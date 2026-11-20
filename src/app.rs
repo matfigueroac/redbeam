@@ -90,6 +90,7 @@ pub struct RedBimApp {
     pub tile_textures: HashMap<(Uuid, usize), CachedTile>,
     pub image_textures: HashMap<Uuid, TextureHandle>,
     pub failed_image_textures: HashSet<Uuid>,
+    pub logo_texture: Option<TextureHandle>,
     pub snap_indices: HashMap<(Uuid, usize), SnapIndex>,
     pub requested_base: HashSet<(Uuid, usize)>,
     pub requested_thumbs: HashSet<(Uuid, usize)>,
@@ -153,6 +154,14 @@ impl RedBimApp {
             tile_textures: HashMap::new(),
             image_textures: HashMap::new(),
             failed_image_textures: HashSet::new(),
+            logo_texture: image::load_from_memory(crate::ui::icons::REDBIM_LOGO_PNG)
+                .ok()
+                .map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let ci = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+                    cc.egui_ctx.load_texture("redbim_app_logo", ci, TextureOptions::LINEAR)
+                }),
             snap_indices: HashMap::new(),
             requested_base: HashSet::new(),
             requested_thumbs: HashSet::new(),
@@ -1195,6 +1204,10 @@ impl RedBimApp {
                 .show(ui, |ui| {
                     ui.set_max_width(480.0);
                     ui.vertical_centered(|ui| {
+                        if let Some(logo) = &self.logo_texture {
+                            ui.add(egui::Image::new((logo.id(), egui::vec2(72.0, 72.0))));
+                            ui.add_space(6.0);
+                        }
                         ui.label(
                             RichText::new("RedBIM")
                                 .strong()
