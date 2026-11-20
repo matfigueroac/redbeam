@@ -119,33 +119,78 @@ pub fn icon_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     if ui.is_rect_visible(rect) {
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("hov"), resp.hovered() && enabled, 0.11);
+        let active_t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id.with("act"), active && enabled, 0.13);
+        let pressed = resp.is_pointer_button_down_on() && enabled;
+
+        let blend = |a: Color32, b: Color32, t: f32| -> Color32 {
+            let t = t.clamp(0.0, 1.0);
+            let lerp = |x: u8, y: u8| ((x as f32) + (y as f32 - x as f32) * t).round() as u8;
+            Color32::from_rgba_unmultiplied(
+                lerp(a.r(), b.r()),
+                lerp(a.g(), b.g()),
+                lerp(a.b(), b.b()),
+                lerp(a.a(), b.a()),
+            )
+        };
+
         let bg = if !enabled {
             Color32::TRANSPARENT
-        } else if active {
-            theme.accent_red_soft
-        } else if resp.hovered() {
-            theme.control_hover
+        } else if active_t > 0.01 {
+            let base_hov = blend(Color32::TRANSPARENT, theme.control_hover, hover_t);
+            blend(base_hov, theme.accent_red_soft, active_t)
+        } else if hover_t > 0.01 {
+            blend(Color32::TRANSPARENT, theme.control_hover, hover_t)
         } else {
             Color32::TRANSPARENT
         };
-        let border = if active {
-            Stroke::new(1.2, theme.accent_red)
-        } else if resp.hovered() && enabled {
-            Stroke::new(1.0, theme.border_strong)
+
+        let border = if !enabled {
+            Stroke::NONE
+        } else if active_t > 0.05 {
+            Stroke::new(
+                1.1,
+                theme.accent_red.gamma_multiply(0.35 + 0.65 * active_t),
+            )
+        } else if hover_t > 0.05 {
+            Stroke::new(1.0, theme.border_strong.gamma_multiply(hover_t * 0.85))
         } else {
             Stroke::NONE
         };
-        ui.painter()
-            .rect(rect, CornerRadius::same(4), bg, border, egui::StrokeKind::Inside);
+
+        let draw_rect = if pressed { rect.shrink(0.75) } else { rect };
+        ui.painter().rect(
+            draw_rect,
+            CornerRadius::same(5),
+            bg,
+            border,
+            egui::StrokeKind::Inside,
+        );
+
+        // Crisp crimson accent pill along the bottom edge of active tool buttons
+        if active_t > 0.05 && enabled {
+            let bar_w = (draw_rect.width() * 0.52 * active_t).max(4.0);
+            let bar = Rect::from_center_size(
+                Pos2::new(draw_rect.center().x, draw_rect.bottom() - 1.6),
+                Vec2::new(bar_w, 2.0),
+            );
+            ui.painter().rect_filled(
+                bar,
+                CornerRadius::same(1),
+                theme.accent_red.gamma_multiply(active_t),
+            );
+        }
 
         let fg = if !enabled {
-            theme.text_muted.gamma_multiply(0.45)
-        } else if active {
-            theme.accent_red
+            theme.text_muted.gamma_multiply(0.42)
         } else {
-            theme.text_primary
+            blend(theme.text_primary, theme.accent_red, active_t)
         };
-        let icon_rect = rect.shrink((size * 0.2).max(4.0));
+        let icon_rect = draw_rect.shrink((size * 0.21).max(4.0));
         paint_icon(ui.painter(), icon_rect, kind, fg, theme.accent_cyan);
     }
     resp.on_hover_text(tooltip)

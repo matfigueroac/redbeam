@@ -17,12 +17,16 @@ pub fn draw_menu_bar(
     tab: Option<&DocumentTab>,
     settings: &mut AppSettings,
     panels: &mut PanelVisibility,
+    logo_tex: Option<egui::TextureId>,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
     let has_doc = tab.is_some();
     egui::MenuBar::new().ui(ui, |ui| {
-        // Brand pill on far left
+        // Brand emblem + title on far left
+        if let Some(tid) = logo_tex {
+            ui.add(egui::Image::new((tid, egui::vec2(18.0, 18.0))));
+        }
         ui.label(
             RichText::new("RedBIM")
                 .strong()

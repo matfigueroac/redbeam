@@ -1324,6 +1324,7 @@ impl eframe::App for RedBimApp {
                     tab_ref,
                     &mut self.settings,
                     &mut self.panels,
+                    self.logo_texture.as_ref().map(|t| t.id()),
                     &self.theme,
                     &mut actions,
                 );
@@ -1353,12 +1354,18 @@ impl eframe::App for RedBimApp {
                 );
             });
 
-        // Document Tabs Strip
+        // Sleek Modern Document Tabs Strip
         if !self.tabs.is_empty() {
             egui::Panel::top("redbim_doc_tabs")
-                .frame(egui::Frame::new().fill(self.theme.window_bg).inner_margin(egui::Margin::symmetric(8, 3)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(self.theme.window_bg)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .stroke(Stroke::new(1.0, self.theme.border)),
+                )
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
                         let tab_meta: Vec<(String, bool, usize)> = self
                             .tabs
                             .iter()
@@ -1367,34 +1374,83 @@ impl eframe::App for RedBimApp {
                             .collect();
                         for (title, dirty, idx) in tab_meta {
                             let is_act = idx == self.active_tab;
-                            let lbl = if dirty {
-                                format!("{title} ●")
+                            let bg = if is_act {
+                                self.theme.panel_bg
                             } else {
-                                title
+                                self.theme.control_bg.gamma_multiply(0.55)
                             };
-                            egui::Frame::new()
-                                .fill(if is_act { self.theme.panel_bg } else { self.theme.control_bg })
+                            let frame_resp = egui::Frame::new()
+                                .fill(bg)
                                 .stroke(Stroke::new(
                                     1.0,
-                                    if is_act { self.theme.accent_red } else { self.theme.border },
+                                    if is_act {
+                                        self.theme.border_strong
+                                    } else {
+                                        self.theme.border.gamma_multiply(0.5)
+                                    },
                                 ))
-                                .corner_radius(CornerRadius::same(4))
-                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .corner_radius(CornerRadius::same(5))
+                                .inner_margin(egui::Margin::symmetric(10, 4))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui
-                                            .selectable_label(is_act, RichText::new(lbl).size(11.8))
-                                            .clicked()
-                                        {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        if dirty {
+                                            ui.label(
+                                                RichText::new("●")
+                                                    .size(9.0)
+                                                    .color(self.theme.accent_amber),
+                                            );
+                                        }
+                                        let title_resp = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&title)
+                                                    .size(11.8)
+                                                    .strong()
+                                                    .color(if is_act {
+                                                        self.theme.text_primary
+                                                    } else {
+                                                        self.theme.text_secondary
+                                                    }),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if title_resp.clicked() {
                                             actions.push(UiAction::SelectTab(idx));
                                         }
-                                        if ui.small_button("×").clicked() {
+                                        let close_btn = ui.add(
+                                            egui::Button::new(
+                                                RichText::new("×")
+                                                    .size(12.0)
+                                                    .color(self.theme.text_muted),
+                                            )
+                                            .frame(false),
+                                        );
+                                        if close_btn.clicked() {
                                             actions.push(UiAction::CloseTab(idx));
                                         }
                                     });
                                 });
+                            if is_act {
+                                let r = frame_resp.response.rect;
+                                let bar = egui::Rect::from_min_max(
+                                    egui::pos2(r.left() + 6.0, r.bottom() - 2.2),
+                                    egui::pos2(r.right() - 6.0, r.bottom()),
+                                );
+                                ui.painter().rect_filled(
+                                    bar,
+                                    CornerRadius::same(1),
+                                    self.theme.accent_red,
+                                );
+                            }
                         }
-                        if ui.button("+").on_hover_text("Abrir otro PDF").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("+").strong().size(13.0))
+                                    .min_size(egui::vec2(24.0, 22.0)),
+                            )
+                            .on_hover_text("Abrir otro PDF")
+                            .clicked()
+                        {
                             actions.push(UiAction::OpenPdfDialog);
                         }
                     });
@@ -1604,20 +1660,56 @@ impl eframe::App for RedBimApp {
             );
         }
 
-        // Floating toast banner
+        // Animated Floating Toast Banner (smooth slide-up + fade-in/out)
         if let Some((msg, t0)) = &self.toast {
-            if t0.elapsed() < Duration::from_secs(4) {
+            let elapsed = t0.elapsed().as_secs_f32();
+            let total = 3.8_f32;
+            if elapsed < total {
+                let fade_in = (elapsed / 0.18).clamp(0.0, 1.0);
+                let fade_out = ((total - elapsed) / 0.35).clamp(0.0, 1.0);
+                let ease = |t: f32| 1.0 - (1.0 - t).powi(3);
+                let alpha = (ease(fade_in) * fade_out).clamp(0.0, 1.0);
+                let slide_y = -44.0 + (1.0 - ease(fade_in)) * 12.0 + (1.0 - fade_out) * 8.0;
+
+                if elapsed < 0.22 || elapsed > total - 0.38 {
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(200));
+                }
+
                 egui::Area::new(egui::Id::unique("redbim_toast"))
-                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -44.0])
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, slide_y])
                     .order(egui::Order::Foreground)
                     .show(&ctx, |ui| {
                         egui::Frame::new()
-                            .fill(Color32::from_rgba_unmultiplied(15, 23, 42, 235))
-                            .stroke(Stroke::new(1.0, self.theme.accent_cyan))
-                            .corner_radius(CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(14, 7))
+                            .fill(
+                                Color32::from_rgba_unmultiplied(15, 23, 42, (238.0 * alpha) as u8),
+                            )
+                            .stroke(Stroke::new(
+                                1.0,
+                                self.theme.accent_cyan.gamma_multiply(alpha * 0.85),
+                            ))
+                            .corner_radius(CornerRadius::same(7))
+                            .shadow(egui::Shadow {
+                                offset: [0, 4],
+                                blur: 14,
+                                spread: 0,
+                                color: Color32::from_black_alpha((110.0 * alpha) as u8),
+                            })
+                            .inner_margin(egui::Margin::symmetric(14, 8))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(msg).color(Color32::WHITE).strong());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("●")
+                                            .size(10.0)
+                                            .color(self.theme.accent_red.gamma_multiply(alpha)),
+                                    );
+                                    ui.label(
+                                        RichText::new(msg)
+                                            .color(Color32::WHITE.gamma_multiply(alpha))
+                                            .strong(),
+                                    );
+                                });
                             });
                     });
             } else {

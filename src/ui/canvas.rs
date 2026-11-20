@@ -90,6 +90,14 @@ pub enum DragMode {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct SmoothZoomState {
+    pub is_secondary: bool,
+    pub target_zoom: f64,
+    pub anchor_page_pt: Point2,
+    pub anchor_screen: Pos2,
+}
+
 #[derive(Debug, Default)]
 pub struct CanvasState {
     pub creation: Option<CreationState>,
@@ -99,6 +107,8 @@ pub struct CanvasState {
     pub last_viewport_size: (f64, f64),
     pub hover_page_pt: Option<Point2>,
     pub hover_snap: Option<SnapResult>,
+    pub smooth_zoom: Option<SmoothZoomState>,
+    pub last_zoom_activity: Option<std::time::Instant>,
 }
 
 pub struct TileRequest {
@@ -240,9 +250,10 @@ fn draw_canvas_pane(
         let pad_y = ((pane_rect.height() as f64 - drawn_h) * 0.5) / cam.zoom;
         cam.pan = Point2::new(-pad_x, -pad_y);
         cam.fit_pending = false;
+        canvas.smooth_zoom = None;
     }
 
-    // Handle mouse wheel zoom anchored at cursor
+    // Handle smooth mouse wheel zoom anchored at cursor (60/120fps exponential ease)
     let pointer_pos = pane_ui.input(|i| i.pointer.hover_pos());
     let hovered = resp.hovered() || pointer_pos.is_some_and(|p| pane_rect.contains(p));
     if hovered {
@@ -259,11 +270,39 @@ fn draw_canvas_pane(
                 pan_y: cam.pan.y,
             };
             let before_pt = before_xf.screen_to_page(anchor_screen.x as f64, anchor_screen.y as f64);
-            let factor = (1.0 + scroll.y as f64 * 0.0018).clamp(0.75, 1.35);
-            cam.zoom = (cam.zoom * factor).clamp(0.05, 16.0);
-            cam.pan.x = before_pt.x - (anchor_screen.x as f64 - pane_rect.left() as f64) / cam.zoom;
-            cam.pan.y = before_pt.y - (anchor_screen.y as f64 - pane_rect.top() as f64) / cam.zoom;
+            let factor = (1.0 + scroll.y as f64 * 0.0022).clamp(0.72, 1.38);
+            let base_target = canvas
+                .smooth_zoom
+                .as_ref()
+                .filter(|s| s.is_secondary == is_secondary)
+                .map(|s| s.target_zoom)
+                .unwrap_or(cam.zoom);
+            canvas.smooth_zoom = Some(SmoothZoomState {
+                is_secondary,
+                target_zoom: (base_target * factor).clamp(0.05, 16.0),
+                anchor_page_pt: before_pt,
+                anchor_screen,
+            });
+            canvas.last_zoom_activity = Some(std::time::Instant::now());
         }
+    }
+
+    if let Some(sz) = canvas.smooth_zoom.clone()
+        && sz.is_secondary == is_secondary
+    {
+        let dt = pane_ui.input(|i| i.stable_dt).clamp(0.001, 0.05) as f64;
+        let alpha = 1.0 - (-18.0 * dt).exp();
+        let next_zoom = cam.zoom + (sz.target_zoom - cam.zoom) * alpha;
+        if (sz.target_zoom - next_zoom).abs() < 0.0005 * next_zoom.max(0.1) {
+            cam.zoom = sz.target_zoom;
+            canvas.smooth_zoom = None;
+        } else {
+            cam.zoom = next_zoom;
+            pane_ui.ctx().request_repaint();
+            canvas.last_zoom_activity = Some(std::time::Instant::now());
+        }
+        cam.pan.x = sz.anchor_page_pt.x - (sz.anchor_screen.x as f64 - pane_rect.left() as f64) / cam.zoom;
+        cam.pan.y = sz.anchor_page_pt.y - (sz.anchor_screen.y as f64 - pane_rect.top() as f64) / cam.zoom;
     }
 
     let xf = PageTransform {
@@ -284,12 +323,19 @@ fn draw_canvas_pane(
     let (brx, bry) = xf.page_to_screen(Point2::new(page.width_pt, page.height_pt));
     let page_screen_rect = Rect::from_min_max(Pos2::new(tlx, tly), Pos2::new(brx, bry));
 
-    // Drop shadow + white paper sheet
-    painter.rect_filled(
-        page_screen_rect.translate(Vec2::new(4.0, 5.0)),
-        CornerRadius::ZERO,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 75),
-    );
+    // Soft multi-layer elevation shadow + crisp white paper sheet
+    let is_dark = theme.mode == crate::model::settings::ThemeMode::Dark;
+    for (expand, dy, alpha) in [
+        (7.0, 5.0, if is_dark { 22 } else { 10 }),
+        (3.5, 3.0, if is_dark { 38 } else { 18 }),
+        (1.0, 1.5, if is_dark { 58 } else { 28 }),
+    ] {
+        painter.rect_filled(
+            page_screen_rect.expand(expand).translate(Vec2::new(0.0, dy)),
+            CornerRadius::same(2),
+            Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
+        );
+    }
     painter.rect_filled(page_screen_rect, CornerRadius::ZERO, Color32::WHITE);
 
     // Base page raster texture
@@ -335,21 +381,31 @@ fn draw_canvas_pane(
                 );
             }
         }
+        let zoom_settled = canvas.smooth_zoom.is_none()
+            && canvas
+                .last_zoom_activity
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(90));
         if need_tile && crop_rect.width() > 2.0 && crop_rect.height() > 2.0 {
-            let padded = crop_rect.expand(crop_rect.width().max(crop_rect.height()) * 0.15);
-            let clamped = Rect2::from_min_max(
-                Point2::new(padded.min_x.max(0.0), padded.min_y.max(0.0)),
-                Point2::new(padded.max_x.min(page.width_pt), padded.max_y.min(page.height_pt)),
-            );
-            let out_w = ((clamped.width() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
-            let out_h = ((clamped.height() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
-            tile_requests.push(TileRequest {
-                doc_id: tab.id,
-                page_index: page_idx,
-                crop_rect_pt: clamped,
-                out_w,
-                out_h,
-            });
+            if zoom_settled {
+                let padded = crop_rect.expand(crop_rect.width().max(crop_rect.height()) * 0.15);
+                let clamped = Rect2::from_min_max(
+                    Point2::new(padded.min_x.max(0.0), padded.min_y.max(0.0)),
+                    Point2::new(padded.max_x.min(page.width_pt), padded.max_y.min(page.height_pt)),
+                );
+                let out_w = ((clamped.width() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
+                let out_h = ((clamped.height() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
+                tile_requests.push(TileRequest {
+                    doc_id: tab.id,
+                    page_index: page_idx,
+                    crop_rect_pt: clamped,
+                    out_w,
+                    out_h,
+                });
+            } else {
+                pane_ui
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(95));
+            }
         }
     }
 
@@ -416,15 +472,27 @@ fn draw_canvas_pane(
         egui::StrokeKind::Outside,
     );
 
-    // Draw all visible markups for this page
-    let selected_ids = tab.selected_ids.clone();
-    let doc_totals = tab.compute_totals(Some(page_idx));
-    let legend_rows = build_legend_summary(tab, page_idx);
+    // Draw all visible markups for this page (compute Legend summary lazily only if needed!)
+    let has_legend = tab.markups.iter().any(|m| {
+        m.page_index == page_idx
+            && matches!(m.kind, MarkupKind::Legend { .. })
+            && tab.is_layer_visible(&m.layer)
+    });
+    let doc_totals = if has_legend {
+        tab.compute_totals(Some(page_idx))
+    } else {
+        crate::model::document::DocumentTotals::default()
+    };
+    let legend_rows = if has_legend {
+        build_legend_summary(tab, page_idx)
+    } else {
+        Vec::new()
+    };
     for m in &tab.markups {
         if m.page_index != page_idx || !tab.is_layer_visible(&m.layer) {
             continue;
         }
-        let is_sel = selected_ids.contains(&m.id);
+        let is_sel = tab.selected_ids.contains(&m.id);
         draw_markup_on_canvas(
             &painter,
             xf,
@@ -436,6 +504,49 @@ fn draw_canvas_pane(
             &doc_totals,
             res.image_textures,
             theme,
+        );
+    }
+
+    // Subtle live coordinate HUD pill in bottom-right corner when drawing or measuring
+    if hovered
+        && *active_tool != ActiveTool::Select
+        && *active_tool != ActiveTool::Pan
+        && let Some(hp) = canvas.hover_page_pt
+        && hp.x >= 0.0
+        && hp.y >= 0.0
+        && hp.x <= page.width_pt
+        && hp.y <= page.height_pt
+    {
+        let sc = resolve_scale_at(&page.scale, &page.viewports, hp);
+        let xm = hp.x * sc.pt_to_meters_x();
+        let ym = hp.y * sc.pt_to_meters_y();
+        let txt = format!(
+            "X: {}  ·  Y: {}",
+            sc.format_length_val(xm),
+            sc.format_length_val(ym)
+        );
+        let pill_w = (txt.chars().count() as f32 * 6.5 + 18.0).max(120.0);
+        let pill_r = Rect::from_min_size(
+            Pos2::new(pane_rect.right() - pill_w - 10.0, pane_rect.bottom() - 28.0),
+            Vec2::new(pill_w, 20.0),
+        );
+        painter.rect_filled(
+            pill_r,
+            CornerRadius::same(5),
+            Color32::from_rgba_unmultiplied(15, 23, 42, 205),
+        );
+        painter.rect_stroke(
+            pill_r,
+            CornerRadius::same(5),
+            Stroke::new(1.0, theme.border_strong),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            pill_r.center(),
+            egui::Align2::CENTER_CENTER,
+            txt,
+            FontId::monospace(10.5),
+            Color32::from_rgb(226, 232, 240),
         );
     }
 
@@ -612,6 +723,7 @@ fn handle_canvas_input(
                 return;
             }
             None if resp.hovered() || resp.dragged() => {
+                canvas.smooth_zoom = None;
                 canvas.drag = Some(DragMode::Pan { last_screen: pos });
                 return;
             }
