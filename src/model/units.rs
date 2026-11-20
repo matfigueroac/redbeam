@@ -13,7 +13,7 @@ pub const PT_PER_METER: f64 = 72_000.0 / 25.4;
 pub const METERS_PER_INCH: f64 = 0.0254;
 pub const METERS_PER_FOOT: f64 = 0.3048;
 pub const METERS_PER_YARD: f64 = 0.9144;
-pub const SQ_METERS_PER_ACRE: f64 = 4046.856_422_4;
+pub const SQ_METERS_PER_ACRE: f64 = 4046.8564224;
 pub const SQ_METERS_PER_HECTARE: f64 = 10_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

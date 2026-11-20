@@ -643,11 +643,11 @@ pub fn create_demo_markups() -> Vec<Markup> {
         MarkupStyle {
             stroke_color: red,
             fill_color: Some([255, 255, 255, 240]),
-            fill_opacity: 0.92,
+            fill_opacity: 0.94,
             line_style: LineStyle::Cloud,
             end_end: LineEnd::ClosedArrow,
             text_color: red,
-            font_size: 11.0,
+            font_size: 28.0,
             ..Default::default()
         },
         MarkupKind::CloudPlus {
@@ -655,8 +655,8 @@ pub fn create_demo_markups() -> Vec<Markup> {
                 .corners()
                 .to_vec(),
             is_rect: true,
-            knee: Point2::new(ox + 17.5 * s, oy + 3.0 * s),
-            box_rect: Rect2::from_xywh(ox + 19.0 * s, oy + 1.4 * s, 175.0, 40.0),
+            knee: Point2::new(ox + 17.5 * s, oy + 4.0 * s),
+            box_rect: Rect2::from_xywh(ox + 19.2 * s, oy + 2.5 * s, 15.5 * s, 3.3 * s),
             text: "Verificar distanciamiento 1,20 m al borde".to_string(),
         },
     );
@@ -670,17 +670,17 @@ pub fn create_demo_markups() -> Vec<Markup> {
         "Ing. Estructural",
         MarkupStyle {
             stroke_color: blue,
-            fill_color: Some([239, 246, 255, 240]),
-            fill_opacity: 0.92,
+            fill_color: Some([239, 246, 255, 245]),
+            fill_opacity: 0.94,
             end_end: LineEnd::ClosedArrow,
             text_color: blue,
-            font_size: 11.0,
+            font_size: 28.0,
             ..Default::default()
         },
         MarkupKind::Callout {
             arrow_tip: Point2::new(ox + 48.0 * s, oy + 14.5 * s),
-            knee: Point2::new(ox + 51.5 * s, oy + 20.5 * s),
-            box_rect: Rect2::from_xywh(ox + 53.0 * s, oy + 19.3 * s, 168.0, 38.0),
+            knee: Point2::new(ox + 50.5 * s, oy + 26.2 * s),
+            box_rect: Rect2::from_xywh(ox + 52.0 * s, oy + 24.8 * s, 14.8 * s, 3.3 * s),
             text: "Reforzar costanera en faldón F1".to_string(),
         },
     );
@@ -798,7 +798,7 @@ pub fn create_demo_markups() -> Vec<Markup> {
             ..Default::default()
         },
         MarkupKind::Stamp {
-            rect: Rect2::from_xywh(ox + 18.0 * s, oy + 27.5 * s, 220.0, 56.0),
+            rect: Rect2::from_xywh(ox + 18.0 * s, oy + 28.0 * s, 17.5 * s, 3.8 * s),
             title: "PRELIMINAR".to_string(),
             subtitle: "Revisión RedBIM Chile".to_string(),
             show_date: true,

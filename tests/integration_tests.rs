@@ -116,3 +116,38 @@ fn csv_export_and_page_operations_work() {
     delete_page_in_doc(&mut tab, 1).expect("delete");
     assert_eq!(tab.pages.len(), 3);
 }
+
+#[test]
+fn imperial_units_and_cloud_plus_round_trip() {
+    use redbim::model::markup::MarkupKind;
+    use redbim::model::scale::IMPERIAL_PRESETS;
+    use redbim::model::scale::PageScale;
+    use redbim::model::units::{LengthUnit, PT_PER_INCH, Precision, UnitSystem};
+
+    // 1/4" = 1'-0" -> 3.0 inches on paper = 12'-0" real
+    let p = IMPERIAL_PRESETS
+        .iter()
+        .find(|x| x.label == "1/4\" = 1'-0\"")
+        .unwrap();
+    let mut scale = PageScale::from_preset(p);
+    scale.precision = Precision::Frac16;
+    let d_m = scale.distance_meters(
+        Point2::new(0.0, 0.0),
+        Point2::new(3.125 * PT_PER_INCH, 0.0),
+    );
+    // 3.125 in / 0.25 in/ft = 12.5 ft = 12'-6"
+    assert_eq!(scale.format_length_val(d_m), "12'-6\"");
+
+    // Switching back to Chilean Metric defaults to meters
+    scale.set_unit_system(UnitSystem::Metric);
+    assert_eq!(scale.display_unit, LengthUnit::Meter);
+
+    // Confirm CloudPlus from demo survives save+reopen intact
+    let tab = open_demo_chile_document().expect("demo");
+    let saved = save_pdf_to_bytes(&tab).expect("save");
+    let reopened = open_pdf_from_bytes("demo.pdf", None, saved).expect("reopen");
+    assert!(reopened.markups.iter().any(|m| matches!(
+        &m.kind,
+        MarkupKind::CloudPlus { text, .. } if text.contains("1,20 m")
+    )));
+}

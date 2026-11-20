@@ -1,22 +1,62 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use redbim::app::{LaunchConfig, RedBimApp};
+use std::path::PathBuf;
 
-struct RedBimBootstrap;
+fn parse_args() -> LaunchConfig {
+    let mut cfg = LaunchConfig {
+        files: Vec::new(),
+        demo: false,
+        light_theme: false,
+        open_measurements_tab: false,
+        screenshot_out: None,
+    };
 
-impl eframe::App for RedBimBootstrap {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("RedBIM Bootstrap");
-        });
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--demo" => cfg.demo = true,
+            "--light" => cfg.light_theme = true,
+            "--measurements" => cfg.open_measurements_tab = true,
+            "--screenshot" => {
+                if let Some(p) = args.next() {
+                    cfg.screenshot_out = Some(PathBuf::from(p));
+                }
+            }
+            other if !other.starts_with('-') => {
+                cfg.files.push(PathBuf::from(other));
+            }
+            _ => {}
+        }
     }
+    cfg
 }
 
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions::default();
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some_and(|a| a == "--export-demo") {
+        let _ = args.next();
+        if let Some(out) = args.next() {
+            let bytes = redbim::pdf::demo_blueprint::generate_demo_chile_pdf();
+            if let Some(parent) = std::path::Path::new(&out).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&out, bytes);
+        }
+        return Ok(());
+    }
+    let launch = parse_args();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("RedBIM — Visor y Cubicación de Planos PDF (Chile / Métrico)")
+            .with_inner_size([1440.0, 880.0])
+            .with_min_inner_size([960.0, 620.0]),
+        ..Default::default()
+    };
     eframe::run_native(
         "RedBIM",
         options,
-        Box::new(|_cc| Ok(Box::new(RedBimBootstrap))),
+        Box::new(move |cc| Ok(Box::new(RedBimApp::new(cc, launch)))),
     )
 }
