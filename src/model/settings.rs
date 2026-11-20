@@ -51,6 +51,8 @@ pub struct AppSettings {
     pub reuse_tool: bool,
     pub dimmer_enabled: bool,
     pub dimmer_opacity: f32,
+    #[serde(default)]
+    pub compact_tool_chest: bool,
     pub recent_files: Vec<PathBuf>,
 }
 
@@ -76,6 +78,7 @@ impl Default for AppSettings {
             reuse_tool: true,
             dimmer_enabled: false,
             dimmer_opacity: 0.45,
+            compact_tool_chest: false,
             recent_files: Vec::new(),
         }
     }

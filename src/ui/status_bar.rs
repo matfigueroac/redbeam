@@ -192,6 +192,11 @@ pub fn draw_status_bar(
                     } else {
                         theme.accent_amber
                     };
+                    let scale_caption = if scale_set {
+                        format!("Escala: {scale_text}")
+                    } else {
+                        "⚠ Sin escala · Calibrar".to_string()
+                    };
                     let resp = egui::Frame::new()
                         .fill(pill_bg)
                         .stroke(Stroke::new(1.0, pill_fg))
@@ -200,7 +205,7 @@ pub fn draw_status_bar(
                         .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("Escala: {scale_text}"))
+                                    RichText::new(scale_caption)
                                         .size(11.5)
                                         .strong()
                                         .color(pill_fg),

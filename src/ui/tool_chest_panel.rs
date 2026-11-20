@@ -9,19 +9,36 @@ pub fn draw_tool_chest_panel(
     chest: &mut ToolChest,
     search: &mut String,
     active_item_id: Option<uuid::Uuid>,
+    compact: &mut bool,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
-) {
+) -> bool {
+    let mut compact_toggled = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Caja de herramientas").strong().size(13.0));
+        ui.add(
+            egui::Label::new(RichText::new("Caja de herramientas").strong().size(12.5)).truncate(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .small_button("Restaurar")
+                .small_button("↺")
                 .on_hover_text("Restaurar conjuntos predeterminados de RedBIM")
                 .clicked()
             {
                 *chest = ToolChest::default_chilean_sets();
                 chest.save();
+            }
+            let lbl = if *compact { "⊞" } else { "⊟" };
+            if ui
+                .small_button(lbl)
+                .on_hover_text(if *compact {
+                    "Cambiar a vista normal de símbolos"
+                } else {
+                    "Cambiar a vista compacta de símbolos"
+                })
+                .clicked()
+            {
+                *compact = !*compact;
+                compact_toggled = true;
             }
         });
     });
@@ -92,7 +109,9 @@ pub fn draw_tool_chest_panel(
                     continue;
                 }
 
-                let cols = ((ui.available_width() / 52.0).floor() as usize).clamp(3, 6);
+                let cell_px = if *compact { 36.0 } else { 44.0 };
+                let step_px = cell_px + 7.0;
+                let cols = ((ui.available_width() / step_px).floor() as usize).clamp(3, 7);
                 let mut remove_idx: Option<usize> = None;
                 let mut toggle_mode_idx: Option<usize> = None;
 
@@ -102,7 +121,7 @@ pub fn draw_tool_chest_panel(
                     .show(ui, |ui| {
                         for (grid_i, (real_idx, item)) in items_snapshot.iter().enumerate() {
                             let is_active = active_item_id == Some(item.id);
-                            let card_size = Vec2::splat(44.0);
+                            let card_size = Vec2::splat(cell_px);
                             let (rect, resp) = ui.allocate_exact_size(card_size, Sense::click());
 
                             if ui.is_rect_visible(rect) {
@@ -212,4 +231,5 @@ pub fn draw_tool_chest_panel(
         chest.save();
     }
     let _ = Color32::TRANSPARENT;
+    compact_toggled
 }

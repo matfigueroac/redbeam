@@ -101,16 +101,8 @@ pub fn open_pdf_from_bytes(
         page_id_to_idx.insert(oid, num.saturating_sub(1) as usize);
     }
 
-    // Extract text per page for instant Search panel
-    let mut search_text_by_page = vec![String::new(); pages.len()];
-    for &num in page_map.keys() {
-        let idx = num.saturating_sub(1) as usize;
-        if idx < search_text_by_page.len()
-            && let Ok(txt) = doc.extract_text(&[num])
-        {
-            search_text_by_page[idx] = txt;
-        }
-    }
+    // Extract text per page lazily in background worker so opening huge PDFs is instant
+    let search_text_by_page = vec![String::new(); pages.len()];
 
     // Read embedded lossless RedBIMState if present
     if let Some(state) = read_embedded_state(&doc) {
@@ -551,7 +543,23 @@ pub fn strip_annots_for_render(raw_bytes: &[u8]) -> Vec<u8> {
 
 pub fn save_pdf_file(tab: &DocumentTab, path: &Path) -> Result<Vec<u8>, String> {
     let bytes = save_pdf_to_bytes(tab)?;
-    std::fs::write(path, &bytes).map_err(|e| format!("Error al guardar {}: {e}", path.display()))?;
+    let tmp_name = format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("redbim"),
+        std::process::id()
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+    std::fs::write(&tmp_path, &bytes)
+        .map_err(|e| format!("Error al guardar archivo temporal {}: {e}", tmp_path.display()))?;
+    if std::fs::rename(&tmp_path, path).is_err() {
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("Error al reemplazar {}: {e}", path.display())
+        })?;
+    }
     Ok(bytes)
 }
 

@@ -24,6 +24,7 @@ pub enum DialogRequest {
     CreateStamp,
     Preferences,
     Shortcuts,
+    CommandPalette,
     About,
 }
 

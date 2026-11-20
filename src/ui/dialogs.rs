@@ -55,6 +55,11 @@ pub enum ActiveModal {
     },
     Preferences,
     Shortcuts,
+    CommandPalette {
+        query: String,
+        selected: usize,
+        focus_requested: bool,
+    },
     About,
 }
 
@@ -127,6 +132,11 @@ impl ActiveModal {
             },
             DialogRequest::Preferences => Self::Preferences,
             DialogRequest::Shortcuts => Self::Shortcuts,
+            DialogRequest::CommandPalette => Self::CommandPalette {
+                query: String::new(),
+                selected: 0,
+                focus_requested: true,
+            },
             DialogRequest::About => Self::About,
         }
     }
@@ -701,7 +711,9 @@ pub fn draw_active_modal(
                         ("Doble clic en texto", "Editar texto directamente en el plano"),
                         ("Espacio + Arrastrar / Rueda", "Mover plano / Zoom al cursor"),
                         ("Ctrl+O / Ctrl+S / Ctrl+Z / Ctrl+Y", "Abrir / Guardar / Deshacer / Rehacer"),
-                        ("Ctrl+0 / Ctrl+1", "Ajustar página / Zoom 100%"),
+                        ("Ctrl+K", "Paleta de comandos rápida"),
+                        ("Ctrl+0 / Ctrl+1 / Ctrl++ / Ctrl+-", "Ajustar página / 100% / Zoom"),
+                        ("RePág / AvPág", "Página anterior / Página siguiente"),
                     ];
                     egui::Grid::new("sc_grid")
                         .num_columns(2)
@@ -717,6 +729,138 @@ pub fn draw_active_modal(
                     if ui.button("Cerrar").clicked() {
                         close_clicked = true;
                     }
+                });
+        }
+
+        ActiveModal::CommandPalette {
+            query,
+            selected,
+            focus_requested,
+        } => {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close_clicked = true;
+            }
+            let has_doc = tab.is_some();
+            let cmds = build_palette_commands(has_doc, settings.theme);
+            let q = query.trim().to_lowercase();
+            let filtered: Vec<&PaletteCommand> = cmds
+                .iter()
+                .filter(|c| {
+                    q.is_empty()
+                        || c.label.to_lowercase().contains(&q)
+                        || c.category.to_lowercase().contains(&q)
+                        || c.shortcut.to_lowercase().contains(&q)
+                })
+                .collect();
+
+            if !filtered.is_empty() {
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    *selected = (*selected + 1) % filtered.len();
+                } else if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    *selected = (*selected + filtered.len() - 1) % filtered.len();
+                }
+                if *selected >= filtered.len() {
+                    *selected = 0;
+                }
+            } else {
+                *selected = 0;
+            }
+
+            let enter_hit = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+
+            egui::Window::new("Paleta de comandos (Ctrl+K)")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .fixed_size([470.0, 360.0])
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 74.0])
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("⌘").strong().size(14.0).color(theme.accent_red));
+                        let te = ui.add(
+                            egui::TextEdit::singleline(query)
+                                .hint_text("Buscar herramienta, escala (ej. 1:50), o acción...")
+                                .desired_width(f32::INFINITY),
+                        );
+                        if *focus_requested {
+                            te.request_focus();
+                            *focus_requested = false;
+                        }
+                    });
+                    ui.separator();
+
+                    let mut chosen: Option<UiAction> = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("cmd_palette_scroll")
+                        .max_height(285.0)
+                        .show(ui, |ui| {
+                            if filtered.is_empty() {
+                                ui.label(
+                                    RichText::new("Sin comandos coincidentes")
+                                        .color(theme.text_muted),
+                                );
+                            }
+                            for (i, cmd) in filtered.iter().enumerate() {
+                                let is_sel = i == *selected;
+                                let bg = if is_sel {
+                                    theme.accent_red_soft
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                let resp = egui::Frame::new()
+                                    .fill(bg)
+                                    .corner_radius(egui::CornerRadius::same(4))
+                                    .inner_margin(egui::Margin::symmetric(8, 5))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(cmd.category)
+                                                    .size(10.5)
+                                                    .color(theme.accent_cyan),
+                                            );
+                                            ui.label(
+                                                RichText::new(cmd.label)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(theme.text_primary),
+                                            );
+                                            if !cmd.shortcut.is_empty() {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(
+                                                            RichText::new(cmd.shortcut)
+                                                                .size(10.5)
+                                                                .color(theme.text_muted),
+                                                        );
+                                                    },
+                                                );
+                                            }
+                                        });
+                                    })
+                                    .response;
+                                if resp.interact(egui::Sense::click()).clicked() {
+                                    chosen = Some(cmd.action.clone());
+                                }
+                                if is_sel && enter_hit {
+                                    chosen = Some(cmd.action.clone());
+                                }
+                            }
+                        });
+                    if let Some(act) = chosen {
+                        actions.push(act);
+                        close_clicked = true;
+                    }
+                    ui.separator();
+                    ui.label(
+                        RichText::new("↑/↓ navegar · Enter ejecutar · Esc cerrar")
+                            .size(10.5)
+                            .color(theme.text_muted),
+                    );
                 });
         }
 
@@ -750,6 +894,179 @@ pub fn draw_active_modal(
         *modal_slot = Some(modal);
     }
     let _ = Point2::default();
+}
+
+struct PaletteCommand {
+    category: &'static str,
+    label: &'static str,
+    shortcut: &'static str,
+    action: UiAction,
+}
+
+fn build_palette_commands(has_doc: bool, theme_mode: ThemeMode) -> Vec<PaletteCommand> {
+    use crate::model::tool_chest::ActiveTool;
+    let mut out = vec![
+        PaletteCommand {
+            category: "Archivo",
+            label: "Abrir archivo PDF...",
+            shortcut: "Ctrl+O",
+            action: UiAction::OpenPdfDialog,
+        },
+        PaletteCommand {
+            category: "Archivo",
+            label: "Nuevo plano en blanco (ISO A1)",
+            shortcut: "",
+            action: UiAction::NewBlankDocument,
+        },
+        PaletteCommand {
+            category: "Archivo",
+            label: "Abrir plano de ejemplo (Chile 1:100)",
+            shortcut: "",
+            action: UiAction::OpenDemoChile,
+        },
+        PaletteCommand {
+            category: "Archivo",
+            label: "Combinar varios PDFs...",
+            shortcut: "",
+            action: UiAction::CombinePdfs,
+        },
+    ];
+
+    if has_doc {
+        out.extend([
+            PaletteCommand {
+                category: "Archivo",
+                label: "Guardar PDF",
+                shortcut: "Ctrl+S",
+                action: UiAction::SaveDocument,
+            },
+            PaletteCommand {
+                category: "Archivo",
+                label: "Exportar PDF aplanado...",
+                shortcut: "",
+                action: UiAction::ExportFlattenedPdf,
+            },
+            PaletteCommand {
+                category: "Archivo",
+                label: "Exportar Lista de Marcas (CSV Chile ;)",
+                shortcut: "",
+                action: UiAction::ExportCsv(CsvDelimiter::Semicolon),
+            },
+            PaletteCommand {
+                category: "Documento",
+                label: "Comparar con otro PDF...",
+                shortcut: "",
+                action: UiAction::CompareWithPdf,
+            },
+            PaletteCommand {
+                category: "Documento",
+                label: "Extraer página actual a PDF...",
+                shortcut: "",
+                action: UiAction::ExtractCurrentPage,
+            },
+            PaletteCommand {
+                category: "Medición",
+                label: "Calibrar escala con 2 puntos",
+                shortcut: "",
+                action: UiAction::StartTwoPointCalibration,
+            },
+            PaletteCommand {
+                category: "Medición",
+                label: "Configurar escala y unidades...",
+                shortcut: "",
+                action: UiAction::OpenDialog(DialogRequest::SetScale),
+            },
+            PaletteCommand {
+                category: "Escala",
+                label: "Aplicar escala rápida 1:50 (Métrico Chile)",
+                shortcut: "",
+                action: UiAction::ApplyPageScale {
+                    scale: PageScale::from_metric_ratio(50.0),
+                    apply_all: false,
+                },
+            },
+            PaletteCommand {
+                category: "Escala",
+                label: "Aplicar escala rápida 1:100 (Métrico Chile)",
+                shortcut: "",
+                action: UiAction::ApplyPageScale {
+                    scale: PageScale::from_metric_ratio(100.0),
+                    apply_all: false,
+                },
+            },
+            PaletteCommand {
+                category: "Escala",
+                label: "Aplicar escala rápida 1:200 (Métrico Chile)",
+                shortcut: "",
+                action: UiAction::ApplyPageScale {
+                    scale: PageScale::from_metric_ratio(200.0),
+                    apply_all: false,
+                },
+            },
+            PaletteCommand {
+                category: "Vista",
+                label: "Ajustar página a ventana",
+                shortcut: "Ctrl+0",
+                action: UiAction::FitPage,
+            },
+            PaletteCommand {
+                category: "Vista",
+                label: "Vista dividida vertical",
+                shortcut: "",
+                action: UiAction::ToggleSplitVertical,
+            },
+        ]);
+
+        for (cat, tool, sc) in [
+            ("Marcado", ActiveTool::Note, "N"),
+            ("Marcado", ActiveTool::Callout, "Q"),
+            ("Marcado", ActiveTool::Cloud, "C"),
+            ("Marcado", ActiveTool::CloudPlus, "K"),
+            ("Marcado", ActiveTool::TextBox, "T"),
+            ("Marcado", ActiveTool::Arrow, "A"),
+            ("Marcado", ActiveTool::Rectangle, "R"),
+            ("Marcado", ActiveTool::Polygon, "P"),
+            ("Marcado", ActiveTool::Highlight, "H"),
+            ("Marcado", ActiveTool::Stamp, "S"),
+            ("Marcado", ActiveTool::Snapshot, "G"),
+            ("Medición", ActiveTool::MeasureLength, "Shift+L"),
+            ("Medición", ActiveTool::MeasurePerimeter, "Shift+P"),
+            ("Medición", ActiveTool::MeasureArea, "Shift+A"),
+            ("Medición", ActiveTool::MeasureVolume, "Shift+V"),
+            ("Medición", ActiveTool::MeasureCount, "Shift+O"),
+            ("Medición", ActiveTool::CutoutPoly, ""),
+        ] {
+            out.push(PaletteCommand {
+                category: cat,
+                label: tool.label_es(),
+                shortcut: sc,
+                action: UiAction::SetTool(tool),
+            });
+        }
+    }
+
+    let next_theme = if theme_mode == ThemeMode::Dark {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    };
+    out.push(PaletteCommand {
+        category: "Vista",
+        label: if theme_mode == ThemeMode::Dark {
+            "Cambiar a tema Claro"
+        } else {
+            "Cambiar a tema Oscuro"
+        },
+        shortcut: "",
+        action: UiAction::SetTheme(next_theme),
+    });
+    out.push(PaletteCommand {
+        category: "Preferencias",
+        label: "Abrir Preferencias...",
+        shortcut: "",
+        action: UiAction::OpenDialog(DialogRequest::Preferences),
+    });
+    out
 }
 
 fn draw_scale_scope_selector(

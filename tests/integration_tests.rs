@@ -393,3 +393,53 @@ fn align_selected_updates_positions() {
         }
     }
 }
+
+#[test]
+fn async_worker_extracts_search_text_and_renders_priority_page() {
+    use redbim::pdf::renderer::{PdfRenderWorker, RenderCommand, RenderResult};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let tab = open_demo_chile_document().expect("demo");
+    let doc_id = tab.id;
+    let raw = Arc::new(tab.raw_pdf_bytes);
+    let clean = Arc::new(strip_annots_for_render(&raw));
+
+    let worker = PdfRenderWorker::spawn(|| {});
+    worker.send(RenderCommand::LoadDocument {
+        doc_id,
+        clean_pdf_bytes: clean,
+    });
+    worker.send(RenderCommand::RenderBasePage {
+        doc_id,
+        page_index: 0,
+        max_side_px: 500,
+        generation: 1,
+    });
+    worker.send(RenderCommand::ExtractSearchText {
+        doc_id,
+        raw_pdf_bytes: raw,
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut got_base = false;
+    let mut got_search = false;
+    while Instant::now() < deadline && (!got_base || !got_search) {
+        for r in worker.drain_results() {
+            match r {
+                RenderResult::BasePageReady { image, .. } => {
+                    assert!(image.width > 100);
+                    got_base = true;
+                }
+                RenderResult::SearchTextReady { text_by_page, .. } => {
+                    assert_eq!(text_by_page.len(), 3);
+                    assert!(text_by_page[0].contains("PLANTA GENERAL"));
+                    got_search = true;
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(got_base && got_search, "got_base={got_base} got_search={got_search}");
+}

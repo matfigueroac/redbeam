@@ -540,6 +540,155 @@ pub fn dimension_offset_segment(a: Point2, b: Point2, offset_pt: f64) -> (Point2
     (a + shift, b + shift, normal)
 }
 
+fn seg_properly_intersects(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let cross = |p: Point2, q: Point2, r: Point2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+    let d1 = cross(a, b, c);
+    let d2 = cross(a, b, d);
+    let d3 = cross(c, d, a);
+    let d4 = cross(c, d, b);
+    ((d1 > 1e-7 && d2 < -1e-7) || (d1 < -1e-7 && d2 > 1e-7))
+        && ((d3 > 1e-7 && d4 < -1e-7) || (d3 < -1e-7 && d4 > 1e-7))
+}
+
+fn point_in_tri_strict(p: Point2, a: Point2, b: Point2, c: Point2) -> bool {
+    let cross = |u: Point2, v: Point2, w: Point2| (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
+    let c1 = cross(a, b, p);
+    let c2 = cross(b, c, p);
+    let c3 = cross(c, a, p);
+    c1 >= -1e-6 && c2 >= -1e-6 && c3 >= -1e-6
+}
+
+fn clean_ring(pts: &[Point2]) -> Vec<Point2> {
+    let mut out: Vec<Point2> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if out.last().is_none_or(|prev| prev.dist(p) > 1e-5) {
+            out.push(p);
+        }
+    }
+    if out.len() >= 2 && out.first().unwrap().dist(*out.last().unwrap()) <= 1e-5 {
+        out.pop();
+    }
+    out
+}
+
+/// Triangulates an arbitrarily concave simple polygon with optional interior cutout holes
+/// into clockwise screen-space triangles via hole-bridging + ear clipping.
+pub fn triangulate_polygon_with_holes(outer: &[Point2], holes: &[Vec<Point2>]) -> Vec<[Point2; 3]> {
+    let mut ring = clean_ring(outer);
+    if ring.len() < 3 {
+        return Vec::new();
+    }
+    if polygon_signed_area(&ring) < 0.0 {
+        ring.reverse();
+    }
+
+    // Prepare holes oriented opposite to outer (negative signed area) and ordered right-to-left
+    let mut clean_holes: Vec<(f64, Vec<Point2>)> = holes
+        .iter()
+        .filter_map(|h| {
+            let mut ch = clean_ring(h);
+            if ch.len() < 3 || polygon_area(&ch) < 1e-4 {
+                return None;
+            }
+            if polygon_signed_area(&ch) > 0.0 {
+                ch.reverse();
+            }
+            let max_x = ch.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            Some((max_x, ch))
+        })
+        .collect();
+    clean_holes.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Bridge each hole into the outer ring using a collision-free mutual vertex pair
+    for (_, hole) in &clean_holes {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (oi, &op) in ring.iter().enumerate() {
+            for (hi, &hp) in hole.iter().enumerate() {
+                if op.dist(hp) < 1e-6 {
+                    continue;
+                }
+                let blocked_outer = (0..ring.len()).any(|k| {
+                    let k2 = (k + 1) % ring.len();
+                    k != oi && k2 != oi && seg_properly_intersects(op, hp, ring[k], ring[k2])
+                });
+                if blocked_outer {
+                    continue;
+                }
+                let blocked_hole = (0..hole.len()).any(|k| {
+                    let k2 = (k + 1) % hole.len();
+                    k != hi && k2 != hi && seg_properly_intersects(op, hp, hole[k], hole[k2])
+                });
+                if blocked_hole {
+                    continue;
+                }
+                let d2 = (op.x - hp.x).powi(2) + (op.y - hp.y).powi(2);
+                if best.is_none_or(|(bd, _, _)| d2 < bd) {
+                    best = Some((d2, oi, hi));
+                }
+            }
+        }
+        if let Some((_, oi, hi)) = best {
+            let mut merged = Vec::with_capacity(ring.len() + hole.len() + 2);
+            merged.extend_from_slice(&ring[..=oi]);
+            for step in 0..=hole.len() {
+                merged.push(hole[(hi + step) % hole.len()]);
+            }
+            merged.push(ring[oi]);
+            merged.extend_from_slice(&ring[oi + 1..]);
+            ring = merged;
+        }
+    }
+
+    // Ear clipping
+    let mut tris = Vec::with_capacity(ring.len().saturating_sub(2));
+    let mut verts: Vec<Point2> = ring;
+    let mut guard = verts.len() * verts.len() + 16;
+
+    while verts.len() > 3 && guard > 0 {
+        guard -= 1;
+        let n = verts.len();
+        let mut clipped = false;
+        for i in 0..n {
+            let a = verts[(i + n - 1) % n];
+            let b = verts[i];
+            let c = verts[(i + 1) % n];
+            let cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            if cross <= 1e-8 {
+                continue;
+            }
+            let any_inside = (0..n).any(|k| {
+                if k == i || k == (i + n - 1) % n || k == (i + 1) % n {
+                    return false;
+                }
+                let p = verts[k];
+                if p.dist(a) < 1e-6 || p.dist(b) < 1e-6 || p.dist(c) < 1e-6 {
+                    return false;
+                }
+                point_in_tri_strict(p, a, b, c)
+            });
+            if !any_inside {
+                tris.push([a, b, c]);
+                verts.remove(i);
+                clipped = true;
+                break;
+            }
+        }
+        if !clipped {
+            break;
+        }
+    }
+    if verts.len() == 3 {
+        let a = verts[0];
+        let b = verts[1];
+        let c = verts[2];
+        let area2 = ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs();
+        if area2 > 1e-8 {
+            tris.push([a, b, c]);
+        }
+    }
+    tris
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +720,32 @@ mod tests {
             .filter(|(a, _)| (a.y - 45.0).abs() < 1.0)
             .collect();
         assert_eq!(mid_lines.len(), 2);
+    }
+
+    #[test]
+    fn triangulates_concave_l_shape_and_hole_with_exact_area() {
+        // L-shape: 100x100 minus 50x50 corner = 7500
+        let l_shape = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(100.0, 0.0),
+            Point2::new(100.0, 50.0),
+            Point2::new(50.0, 50.0),
+            Point2::new(50.0, 100.0),
+            Point2::new(0.0, 100.0),
+        ];
+        // Cutout hole: 20x20 = 400 inside the bottom-left leg
+        let hole = vec![
+            Point2::new(10.0, 10.0),
+            Point2::new(30.0, 10.0),
+            Point2::new(30.0, 30.0),
+            Point2::new(10.0, 30.0),
+        ];
+        let tris = triangulate_polygon_with_holes(&l_shape, &[hole]);
+        assert!(!tris.is_empty());
+        let total_area: f64 = tris
+            .iter()
+            .map(|[a, b, c]| ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5)
+            .sum();
+        assert!((total_area - 7100.0).abs() < 1e-4, "got {total_area}");
     }
 }

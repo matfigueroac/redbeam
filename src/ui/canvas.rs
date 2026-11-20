@@ -5,7 +5,7 @@ use crate::geometry::hit_test::{
 use crate::geometry::math::{
     PageTransform, Point2, Rect2, angle_three_points_deg, clip_hatch_lines,
     dimension_offset_segment, generate_cloud_polyline, polygon_centroid, sample_ellipse,
-    sample_three_point_arc,
+    sample_three_point_arc, triangulate_polygon_with_holes,
 };
 use crate::geometry::snap::{SnapIndex, SnapKind, SnapResult, apply_ortho_constraint, find_best_snap};
 use crate::model::document::{AlignKind, DocumentTab, SplitViewMode};
@@ -91,11 +91,18 @@ pub enum DragMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct SmoothZoomState {
-    pub is_secondary: bool,
-    pub target_zoom: f64,
-    pub anchor_page_pt: Point2,
-    pub anchor_screen: Pos2,
+pub enum CameraAnim {
+    WheelZoom {
+        is_secondary: bool,
+        target_zoom: f64,
+        anchor_page_pt: Point2,
+        anchor_screen: Pos2,
+    },
+    GlideTo {
+        is_secondary: bool,
+        target_zoom: f64,
+        target_pan: Point2,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -107,8 +114,19 @@ pub struct CanvasState {
     pub last_viewport_size: (f64, f64),
     pub hover_page_pt: Option<Point2>,
     pub hover_snap: Option<SnapResult>,
-    pub smooth_zoom: Option<SmoothZoomState>,
+    pub smooth_zoom: Option<CameraAnim>,
     pub last_zoom_activity: Option<std::time::Instant>,
+}
+
+impl CanvasState {
+    pub fn glide_to(&mut self, is_secondary: bool, target_zoom: f64, target_pan: Point2) {
+        self.smooth_zoom = Some(CameraAnim::GlideTo {
+            is_secondary,
+            target_zoom,
+            target_pan,
+        });
+        self.last_zoom_activity = Some(std::time::Instant::now());
+    }
 }
 
 pub struct TileRequest {
@@ -275,10 +293,21 @@ fn draw_canvas_pane(
             let base_target = canvas
                 .smooth_zoom
                 .as_ref()
-                .filter(|s| s.is_secondary == is_secondary)
-                .map(|s| s.target_zoom)
+                .and_then(|s| match s {
+                    CameraAnim::WheelZoom {
+                        is_secondary: sec,
+                        target_zoom,
+                        ..
+                    }
+                    | CameraAnim::GlideTo {
+                        is_secondary: sec,
+                        target_zoom,
+                        ..
+                    } if *sec == is_secondary => Some(*target_zoom),
+                    _ => None,
+                })
                 .unwrap_or(cam.zoom);
-            canvas.smooth_zoom = Some(SmoothZoomState {
+            canvas.smooth_zoom = Some(CameraAnim::WheelZoom {
                 is_secondary,
                 target_zoom: (base_target * factor).clamp(0.05, 16.0),
                 anchor_page_pt: before_pt,
@@ -288,22 +317,52 @@ fn draw_canvas_pane(
         }
     }
 
-    if let Some(sz) = canvas.smooth_zoom.clone()
-        && sz.is_secondary == is_secondary
-    {
+    if let Some(anim) = canvas.smooth_zoom.clone() {
         let dt = pane_ui.input(|i| i.stable_dt).clamp(0.001, 0.05) as f64;
         let alpha = 1.0 - (-18.0 * dt).exp();
-        let next_zoom = cam.zoom + (sz.target_zoom - cam.zoom) * alpha;
-        if (sz.target_zoom - next_zoom).abs() < 0.0005 * next_zoom.max(0.1) {
-            cam.zoom = sz.target_zoom;
-            canvas.smooth_zoom = None;
-        } else {
-            cam.zoom = next_zoom;
-            pane_ui.ctx().request_repaint();
-            canvas.last_zoom_activity = Some(std::time::Instant::now());
+        match anim {
+            CameraAnim::WheelZoom {
+                is_secondary: sec,
+                target_zoom,
+                anchor_page_pt,
+                anchor_screen,
+            } if sec == is_secondary => {
+                let next_zoom = cam.zoom + (target_zoom - cam.zoom) * alpha;
+                if (target_zoom - next_zoom).abs() < 0.0005 * next_zoom.max(0.1) {
+                    cam.zoom = target_zoom;
+                    canvas.smooth_zoom = None;
+                } else {
+                    cam.zoom = next_zoom;
+                    pane_ui.ctx().request_repaint();
+                    canvas.last_zoom_activity = Some(std::time::Instant::now());
+                }
+                cam.pan.x = anchor_page_pt.x
+                    - (anchor_screen.x as f64 - pane_rect.left() as f64) / cam.zoom;
+                cam.pan.y = anchor_page_pt.y
+                    - (anchor_screen.y as f64 - pane_rect.top() as f64) / cam.zoom;
+            }
+            CameraAnim::GlideTo {
+                is_secondary: sec,
+                target_zoom,
+                target_pan,
+            } if sec == is_secondary => {
+                let next_zoom = cam.zoom + (target_zoom - cam.zoom) * alpha;
+                let next_pan = cam.pan.lerp(target_pan, alpha);
+                let zoom_done = (target_zoom - next_zoom).abs() < 0.0005 * next_zoom.max(0.1);
+                let pan_done = next_pan.dist(target_pan) < 0.5;
+                if zoom_done && pan_done {
+                    cam.zoom = target_zoom;
+                    cam.pan = target_pan;
+                    canvas.smooth_zoom = None;
+                } else {
+                    cam.zoom = next_zoom;
+                    cam.pan = next_pan;
+                    pane_ui.ctx().request_repaint();
+                    canvas.last_zoom_activity = Some(std::time::Instant::now());
+                }
+            }
+            _ => {}
         }
-        cam.pan.x = sz.anchor_page_pt.x - (sz.anchor_screen.x as f64 - pane_rect.left() as f64) / cam.zoom;
-        cam.pan.y = sz.anchor_page_pt.y - (sz.anchor_screen.y as f64 - pane_rect.top() as f64) / cam.zoom;
     }
 
     let xf = PageTransform {
@@ -2049,8 +2108,7 @@ fn draw_markup_on_canvas(
             if let Some(fc) = fill_col
                 && points.len() >= 3
             {
-                let base: Vec<Pos2> = points.iter().copied().map(to_pos).collect();
-                painter.add(egui::Shape::convex_polygon(base, fc, Stroke::NONE));
+                paint_triangulated_fill(painter, xf, points, &[], fc);
             }
             if spts.len() >= 2 {
                 painter.add(egui::Shape::closed_line(spts, stroke));
@@ -2492,6 +2550,31 @@ fn draw_box_shape(
     }
 }
 
+fn paint_triangulated_fill(
+    painter: &Painter,
+    xf: PageTransform,
+    outer: &[Point2],
+    cutouts: &[Vec<Point2>],
+    fill_col: Color32,
+) {
+    let tris = triangulate_polygon_with_holes(outer, cutouts);
+    if tris.is_empty() {
+        return;
+    }
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.reserve(tris.len() * 3);
+    mesh.indices.reserve(tris.len() * 3);
+    for [a, b, c] in tris {
+        let base = mesh.vertices.len() as u32;
+        for pt in [a, b, c] {
+            let (sx, sy) = xf.page_to_screen(pt);
+            mesh.colored_vertex(Pos2::new(sx, sy), fill_col);
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_polygon_with_fill_and_hatch(
     painter: &Painter,
@@ -2515,8 +2598,7 @@ fn draw_polygon_with_fill_and_hatch(
         })
         .collect();
     if let Some(fc) = fill_col {
-        // Fan triangles from centroid or convex_polygon fallback
-        painter.add(egui::Shape::convex_polygon(spts.clone(), fc, Stroke::NONE));
+        paint_triangulated_fill(painter, xf, points, cutouts, fc);
     }
     draw_hatch_overlay(painter, xf, points, cutouts, hatch, stroke_col);
     draw_styled_polyline(painter, &spts, true, line_style, stroke);

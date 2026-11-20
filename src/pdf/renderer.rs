@@ -58,6 +58,10 @@ pub enum RenderCommand {
         doc_id: Uuid,
         page_index: usize,
     },
+    ExtractSearchText {
+        doc_id: Uuid,
+        raw_pdf_bytes: Arc<Vec<u8>>,
+    },
 }
 
 #[derive(Debug)]
@@ -85,6 +89,10 @@ pub enum RenderResult {
         page_index: usize,
         index: SnapIndex,
     },
+    SearchTextReady {
+        doc_id: Uuid,
+        text_by_page: Vec<String>,
+    },
     Error {
         doc_id: Uuid,
         message: String,
@@ -92,192 +100,255 @@ pub enum RenderResult {
 }
 
 pub struct PdfRenderWorker {
-    tx: Sender<RenderCommand>,
+    fast_tx: Sender<RenderCommand>,
+    bg_tx: Sender<RenderCommand>,
     rx: Receiver<RenderResult>,
 }
 
-impl PdfRenderWorker {
-    pub fn spawn(repaint_cb: impl Fn() + Send + 'static) -> Self {
-        let (cmd_tx, cmd_rx) = channel::<RenderCommand>();
-        let (res_tx, res_rx) = channel::<RenderResult>();
+struct CachedDoc {
+    pdf: Pdf,
+}
 
+impl PdfRenderWorker {
+    pub fn spawn(repaint_cb: impl Fn() + Send + Sync + 'static) -> Self {
+        let (fast_tx, fast_rx) = channel::<RenderCommand>();
+        let (bg_tx, bg_rx) = channel::<RenderCommand>();
+        let (res_tx, res_rx) = channel::<RenderResult>();
+        let repaint_cb = Arc::new(repaint_cb);
+
+        // Priority Lane 1: Active Base Page & Zoom Tiles (never blocked by thumbnails or text/snap!)
+        {
+            let res_tx = res_tx.clone();
+            let repaint_cb = repaint_cb.clone();
+            thread::Builder::new()
+                .name("redbim-pdf-fast".to_string())
+                .spawn(move || {
+                    let mut docs: HashMap<Uuid, CachedDoc> = HashMap::new();
+                    let interp_settings = default_interpreter_settings();
+                    let render_settings = RenderSettings::default();
+
+                    while let Ok(first) = fast_rx.recv() {
+                        let mut batch = vec![first];
+                        while let Ok(more) = fast_rx.try_recv() {
+                            batch.push(more);
+                        }
+
+                        let mut latest_base: HashMap<(Uuid, usize), (u32, u64)> = HashMap::new();
+                        let mut latest_tile: HashMap<(Uuid, usize), (Rect2, u16, u16, u64)> =
+                            HashMap::new();
+
+                        for cmd in batch {
+                            match cmd {
+                                RenderCommand::LoadDocument {
+                                    doc_id,
+                                    clean_pdf_bytes,
+                                } => {
+                                    if let Ok(pdf) = Pdf::new(clean_pdf_bytes) {
+                                        docs.insert(doc_id, CachedDoc { pdf });
+                                    }
+                                }
+                                RenderCommand::CloseDocument { doc_id } => {
+                                    docs.remove(&doc_id);
+                                    latest_base.retain(|(d, _), _| *d != doc_id);
+                                    latest_tile.retain(|(d, _), _| *d != doc_id);
+                                }
+                                RenderCommand::RenderBasePage {
+                                    doc_id,
+                                    page_index,
+                                    max_side_px,
+                                    generation,
+                                } => {
+                                    latest_base
+                                        .insert((doc_id, page_index), (max_side_px, generation));
+                                }
+                                RenderCommand::RenderTile {
+                                    doc_id,
+                                    page_index,
+                                    crop_rect_pt,
+                                    out_w,
+                                    out_h,
+                                    generation,
+                                } => {
+                                    latest_tile.insert(
+                                        (doc_id, page_index),
+                                        (crop_rect_pt, out_w, out_h, generation),
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        for ((doc_id, page_index), (max_side_px, generation)) in latest_base {
+                            if let Some(cached) = docs.get(&doc_id) {
+                                match render_page_from_pdf(
+                                    &cached.pdf,
+                                    page_index,
+                                    max_side_px,
+                                    &interp_settings,
+                                    &render_settings,
+                                ) {
+                                    Ok(image) => {
+                                        let _ = res_tx.send(RenderResult::BasePageReady {
+                                            doc_id,
+                                            page_index,
+                                            generation,
+                                            image,
+                                        });
+                                        repaint_cb();
+                                    }
+                                    Err(message) => {
+                                        let _ = res_tx.send(RenderResult::Error { doc_id, message });
+                                    }
+                                }
+                            }
+                        }
+
+                        for ((doc_id, page_index), (crop_rect_pt, out_w, out_h, generation)) in
+                            latest_tile
+                        {
+                            if let Some(cached) = docs.get(&doc_id) {
+                                match render_tile_from_pdf(
+                                    &cached.pdf,
+                                    page_index,
+                                    crop_rect_pt,
+                                    out_w,
+                                    out_h,
+                                    &interp_settings,
+                                    &render_settings,
+                                ) {
+                                    Ok(image) => {
+                                        let _ = res_tx.send(RenderResult::TileReady {
+                                            doc_id,
+                                            page_index,
+                                            crop_rect_pt,
+                                            generation,
+                                            image,
+                                        });
+                                        repaint_cb();
+                                    }
+                                    Err(message) => {
+                                        let _ = res_tx.send(RenderResult::Error { doc_id, message });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("spawn pdf fast render worker");
+        }
+
+        // Background Lane 2: Thumbnails, Snap extraction, & Searchable text indexing
         thread::Builder::new()
-            .name("redbim-pdf-worker".to_string())
+            .name("redbim-pdf-bg".to_string())
             .spawn(move || {
-                let mut docs: HashMap<Uuid, Arc<Vec<u8>>> = HashMap::new();
+                let mut docs: HashMap<Uuid, CachedDoc> = HashMap::new();
                 let interp_settings = default_interpreter_settings();
                 let render_settings = RenderSettings::default();
 
-                while let Ok(first) = cmd_rx.recv() {
-                    let mut batch = vec![first];
-                    while let Ok(more) = cmd_rx.try_recv() {
-                        batch.push(more);
+                while let Ok(first) = bg_rx.recv() {
+                    let mut cmds = vec![first];
+                    while let Ok(more) = bg_rx.try_recv() {
+                        cmds.push(more);
                     }
-
-                    // Coalesce stale BasePage / Tile commands for the same doc+page
-                    let mut latest_base: HashMap<(Uuid, usize), (u32, u64)> = HashMap::new();
-                    let mut latest_tile: HashMap<(Uuid, usize), (Rect2, u16, u16, u64)> =
-                        HashMap::new();
-                    let mut other = Vec::new();
-
-                    for cmd in batch {
-                        match cmd {
-                            RenderCommand::RenderBasePage {
-                                doc_id,
-                                page_index,
-                                max_side_px,
-                                generation,
-                            } => {
-                                latest_base.insert((doc_id, page_index), (max_side_px, generation));
-                            }
-                            RenderCommand::RenderTile {
-                                doc_id,
-                                page_index,
-                                crop_rect_pt,
-                                out_w,
-                                out_h,
-                                generation,
-                            } => {
-                                latest_tile.insert(
-                                    (doc_id, page_index),
-                                    (crop_rect_pt, out_w, out_h, generation),
-                                );
-                            }
-                            c => other.push(c),
-                        }
-                    }
-
-                    for cmd in other {
+                    // Apply lifecycle commands first so closed docs are skipped immediately
+                    let mut work = Vec::with_capacity(cmds.len());
+                    for cmd in cmds {
                         match cmd {
                             RenderCommand::LoadDocument {
                                 doc_id,
                                 clean_pdf_bytes,
                             } => {
-                                docs.insert(doc_id, clean_pdf_bytes);
+                                if let Ok(pdf) = Pdf::new(clean_pdf_bytes) {
+                                    docs.insert(doc_id, CachedDoc { pdf });
+                                }
                             }
                             RenderCommand::CloseDocument { doc_id } => {
                                 docs.remove(&doc_id);
                             }
+                            other => work.push(other),
+                        }
+                    }
+
+                    for cmd in work {
+                        match cmd {
                             RenderCommand::RenderThumbnail {
                                 doc_id,
                                 page_index,
                                 max_side_px,
                             } => {
-                                if let Some(bytes) = docs.get(&doc_id) {
-                                    match render_page_rgba(
-                                        bytes,
+                                if let Some(cached) = docs.get(&doc_id)
+                                    && let Ok(image) = render_page_from_pdf(
+                                        &cached.pdf,
                                         page_index,
                                         max_side_px,
                                         &interp_settings,
                                         &render_settings,
-                                    ) {
-                                        Ok(image) => {
-                                            let _ = res_tx.send(RenderResult::ThumbnailReady {
-                                                doc_id,
-                                                page_index,
-                                                image,
-                                            });
-                                            repaint_cb();
-                                        }
-                                        Err(message) => {
-                                            let _ = res_tx.send(RenderResult::Error {
-                                                doc_id,
-                                                message,
-                                            });
-                                        }
-                                    }
+                                    )
+                                {
+                                    let _ = res_tx.send(RenderResult::ThumbnailReady {
+                                        doc_id,
+                                        page_index,
+                                        image,
+                                    });
+                                    repaint_cb();
                                 }
                             }
                             RenderCommand::ExtractSnap { doc_id, page_index } => {
-                                if let Some(bytes) = docs.get(&doc_id) {
-                                    match extract_snap_index(bytes, page_index, &interp_settings) {
-                                        Ok(index) => {
-                                            let _ = res_tx.send(RenderResult::SnapReady {
-                                                doc_id,
-                                                page_index,
-                                                index,
-                                            });
-                                            repaint_cb();
-                                        }
-                                        Err(message) => {
-                                            let _ = res_tx.send(RenderResult::Error {
-                                                doc_id,
-                                                message,
-                                            });
-                                        }
-                                    }
+                                if let Some(cached) = docs.get(&doc_id)
+                                    && let Ok(index) = extract_snap_from_pdf(
+                                        &cached.pdf,
+                                        page_index,
+                                        &interp_settings,
+                                    )
+                                {
+                                    let _ = res_tx.send(RenderResult::SnapReady {
+                                        doc_id,
+                                        page_index,
+                                        index,
+                                    });
+                                    repaint_cb();
                                 }
+                            }
+                            RenderCommand::ExtractSearchText {
+                                doc_id,
+                                raw_pdf_bytes,
+                            } if docs.contains_key(&doc_id) => {
+                                let text_by_page = extract_search_text_by_page(&raw_pdf_bytes);
+                                let _ = res_tx.send(RenderResult::SearchTextReady {
+                                    doc_id,
+                                    text_by_page,
+                                });
+                                repaint_cb();
                             }
                             _ => {}
                         }
                     }
-
-                    for ((doc_id, page_index), (max_side_px, generation)) in latest_base {
-                        if let Some(bytes) = docs.get(&doc_id) {
-                            match render_page_rgba(
-                                bytes,
-                                page_index,
-                                max_side_px,
-                                &interp_settings,
-                                &render_settings,
-                            ) {
-                                Ok(image) => {
-                                    let _ = res_tx.send(RenderResult::BasePageReady {
-                                        doc_id,
-                                        page_index,
-                                        generation,
-                                        image,
-                                    });
-                                    repaint_cb();
-                                }
-                                Err(message) => {
-                                    let _ = res_tx.send(RenderResult::Error { doc_id, message });
-                                }
-                            }
-                        }
-                    }
-
-                    for ((doc_id, page_index), (crop_rect_pt, out_w, out_h, generation)) in
-                        latest_tile
-                    {
-                        if let Some(bytes) = docs.get(&doc_id) {
-                            match render_tile_rgba(
-                                bytes,
-                                page_index,
-                                crop_rect_pt,
-                                out_w,
-                                out_h,
-                                &interp_settings,
-                                &render_settings,
-                            ) {
-                                Ok(image) => {
-                                    let _ = res_tx.send(RenderResult::TileReady {
-                                        doc_id,
-                                        page_index,
-                                        crop_rect_pt,
-                                        generation,
-                                        image,
-                                    });
-                                    repaint_cb();
-                                }
-                                Err(message) => {
-                                    let _ = res_tx.send(RenderResult::Error { doc_id, message });
-                                }
-                            }
-                        }
-                    }
                 }
             })
-            .expect("spawn pdf render worker");
+            .expect("spawn pdf bg worker");
 
         Self {
-            tx: cmd_tx,
+            fast_tx,
+            bg_tx,
             rx: res_rx,
         }
     }
 
     pub fn send(&self, cmd: RenderCommand) {
-        let _ = self.tx.send(cmd);
+        match &cmd {
+            RenderCommand::LoadDocument { .. } | RenderCommand::CloseDocument { .. } => {
+                let _ = self.fast_tx.send(cmd.clone());
+                let _ = self.bg_tx.send(cmd);
+            }
+            RenderCommand::RenderBasePage { .. } | RenderCommand::RenderTile { .. } => {
+                let _ = self.fast_tx.send(cmd);
+            }
+            RenderCommand::RenderThumbnail { .. }
+            | RenderCommand::ExtractSnap { .. }
+            | RenderCommand::ExtractSearchText { .. } => {
+                let _ = self.bg_tx.send(cmd);
+            }
+        }
     }
 
     pub fn drain_results(&self) -> Vec<RenderResult> {
@@ -287,6 +358,23 @@ impl PdfRenderWorker {
         }
         out
     }
+}
+
+fn extract_search_text_by_page(raw_bytes: &[u8]) -> Vec<String> {
+    let Ok(doc) = lopdf::Document::load_mem(raw_bytes) else {
+        return Vec::new();
+    };
+    let page_map = doc.get_pages();
+    let mut out = vec![String::new(); page_map.len()];
+    for &num in page_map.keys() {
+        let idx = num.saturating_sub(1) as usize;
+        if idx < out.len()
+            && let Ok(txt) = doc.extract_text(&[num])
+        {
+            out[idx] = txt;
+        }
+    }
+    out
 }
 
 pub fn default_interpreter_settings() -> InterpreterSettings {
@@ -310,6 +398,23 @@ pub fn render_page_rgba(
     render_settings: &RenderSettings,
 ) -> Result<RgbaImageData, String> {
     let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("PDF inválido: {e:?}"))?;
+    render_page_from_pdf(
+        &pdf,
+        page_index,
+        max_side_px,
+        interp_settings,
+        render_settings,
+    )
+}
+
+fn render_page_from_pdf(
+    pdf: &Pdf,
+    page_index: usize,
+    max_side_px: u32,
+    interp_settings: &InterpreterSettings,
+    render_settings: &RenderSettings,
+) -> Result<RgbaImageData, String> {
+    let cache = RenderCache::new();
     let pages = pdf.pages();
     let page = pages
         .get(page_index)
@@ -318,11 +423,9 @@ pub fn render_page_rgba(
     let (w, h) = page.render_dimensions();
     let max_dim = w.max(h).max(1.0);
     let scale = (max_side_px as f32 / max_dim).clamp(0.05, 4.0);
-    // Keep within u16 bounds safely
     let max_safe = (u16::MAX as f32 - 4.0) / max_dim;
     let scale = scale.min(max_safe);
 
-    let cache = RenderCache::new();
     let pixmap = render(
         page,
         &cache,
@@ -351,10 +454,31 @@ pub fn render_tile_rgba(
     interp_settings: &InterpreterSettings,
     render_settings: &RenderSettings,
 ) -> Result<RgbaImageData, String> {
+    let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("PDF inválido: {e:?}"))?;
+    render_tile_from_pdf(
+        &pdf,
+        page_index,
+        crop_rect_pt,
+        out_w,
+        out_h,
+        interp_settings,
+        render_settings,
+    )
+}
+
+fn render_tile_from_pdf(
+    pdf: &Pdf,
+    page_index: usize,
+    crop_rect_pt: Rect2,
+    out_w: u16,
+    out_h: u16,
+    interp_settings: &InterpreterSettings,
+    render_settings: &RenderSettings,
+) -> Result<RgbaImageData, String> {
     if out_w < 8 || out_h < 8 || crop_rect_pt.width() <= 0.1 || crop_rect_pt.height() <= 0.1 {
         return Err("Región de tile inválida".to_string());
     }
-    let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("PDF inválido: {e:?}"))?;
+    let cache = RenderCache::new();
     let pages = pdf.pages();
     let page = pages
         .get(page_index)
@@ -366,7 +490,6 @@ pub fn render_tile_rgba(
         * Affine::translate((-crop_rect_pt.min_x, -crop_rect_pt.min_y))
         * page.initial_transform(true).to_kurbo();
 
-    let cache = RenderCache::new();
     let mut ctx = RenderContext::new(out_w, out_h);
     render_into(page, &cache, interp_settings, render_settings, &mut ctx, transform);
     ctx.flush();
@@ -490,6 +613,14 @@ pub fn extract_snap_index(
     interp_settings: &InterpreterSettings,
 ) -> Result<SnapIndex, String> {
     let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("PDF inválido: {e:?}"))?;
+    extract_snap_from_pdf(&pdf, page_index, interp_settings)
+}
+
+fn extract_snap_from_pdf(
+    pdf: &Pdf,
+    page_index: usize,
+    interp_settings: &InterpreterSettings,
+) -> Result<SnapIndex, String> {
     let pages = pdf.pages();
     let page = pages
         .get(page_index)

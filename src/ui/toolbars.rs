@@ -23,6 +23,24 @@ const QUICK_COLORS: &[[u8; 4]] = &[
     [255, 255, 255, 255], // White
 ];
 
+fn toolbar_group(
+    ui: &mut egui::Ui,
+    theme: &RedBimTheme,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::new()
+        .fill(theme.card_bg.gamma_multiply(0.75))
+        .stroke(Stroke::new(1.0, theme.border.gamma_multiply(0.7)))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                add_contents(ui);
+            });
+        });
+}
+
 pub fn draw_main_toolbar(
     ui: &mut egui::Ui,
     tab: Option<&DocumentTab>,
@@ -35,155 +53,149 @@ pub fn draw_main_toolbar(
     let can_redo = tab.is_some_and(|t| !t.redo_stack.is_empty());
 
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
 
-        // File & Undo group
-        if icon_button(ui, 26.0, IconKind::NewDoc, false, true, "Nuevo plano en blanco", theme).clicked() {
-            actions.push(UiAction::NewBlankDocument);
-        }
-        if icon_button(ui, 26.0, IconKind::OpenFile, false, true, "Abrir PDF (Ctrl+O)", theme).clicked() {
-            actions.push(UiAction::OpenPdfDialog);
-        }
-        if icon_button(ui, 26.0, IconKind::SaveFile, false, has_doc, "Guardar PDF (Ctrl+S)", theme).clicked() {
-            actions.push(UiAction::SaveDocument);
-        }
-        if icon_button(ui, 26.0, IconKind::FlattenPdf, false, has_doc, "Exportar PDF aplanado", theme).clicked() {
-            actions.push(UiAction::ExportFlattenedPdf);
-        }
-        if icon_button(ui, 26.0, IconKind::ExportCsv, false, has_doc, "Exportar Lista de Marcas CSV", theme).clicked() {
-            actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
-        }
+        toolbar_group(ui, theme, |ui| {
+            if icon_button(ui, 26.0, IconKind::NewDoc, false, true, "Nuevo plano en blanco", theme).clicked() {
+                actions.push(UiAction::NewBlankDocument);
+            }
+            if icon_button(ui, 26.0, IconKind::OpenFile, false, true, "Abrir PDF (Ctrl+O)", theme).clicked() {
+                actions.push(UiAction::OpenPdfDialog);
+            }
+            if icon_button(ui, 26.0, IconKind::SaveFile, false, has_doc, "Guardar PDF (Ctrl+S)", theme).clicked() {
+                actions.push(UiAction::SaveDocument);
+            }
+            if icon_button(ui, 26.0, IconKind::FlattenPdf, false, has_doc, "Exportar PDF aplanado", theme).clicked() {
+                actions.push(UiAction::ExportFlattenedPdf);
+            }
+            if icon_button(ui, 26.0, IconKind::ExportCsv, false, has_doc, "Exportar Lista de Marcas CSV", theme).clicked() {
+                actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
+            }
+            if icon_button(ui, 26.0, IconKind::Undo, false, can_undo, "Deshacer (Ctrl+Z)", theme).clicked() {
+                actions.push(UiAction::Undo);
+            }
+            if icon_button(ui, 26.0, IconKind::Redo, false, can_redo, "Rehacer (Ctrl+Y)", theme).clicked() {
+                actions.push(UiAction::Redo);
+            }
+        });
 
-        ui.separator();
+        toolbar_group(ui, theme, |ui| {
+            for tool in [ActiveTool::Select, ActiveTool::Pan, ActiveTool::ZoomWindow] {
+                if icon_button(
+                    ui,
+                    26.0,
+                    IconKind::from_tool(tool),
+                    active_tool == tool,
+                    has_doc,
+                    tool.label_es(),
+                    theme,
+                )
+                .clicked()
+                {
+                    actions.push(UiAction::SetTool(tool));
+                }
+            }
+        });
 
-        if icon_button(ui, 26.0, IconKind::Undo, false, can_undo, "Deshacer (Ctrl+Z)", theme).clicked() {
-            actions.push(UiAction::Undo);
-        }
-        if icon_button(ui, 26.0, IconKind::Redo, false, can_redo, "Rehacer (Ctrl+Y)", theme).clicked() {
-            actions.push(UiAction::Redo);
-        }
+        toolbar_group(ui, theme, |ui| {
+            for tool in [
+                ActiveTool::Note,
+                ActiveTool::TextBox,
+                ActiveTool::Typewriter,
+                ActiveTool::Callout,
+                ActiveTool::Cloud,
+                ActiveTool::CloudPlus,
+            ] {
+                if icon_button(
+                    ui,
+                    26.0,
+                    IconKind::from_tool(tool),
+                    active_tool == tool,
+                    has_doc,
+                    tool.label_es(),
+                    theme,
+                )
+                .clicked()
+                {
+                    actions.push(UiAction::SetTool(tool));
+                }
+            }
+        });
 
-        ui.separator();
+        toolbar_group(ui, theme, |ui| {
+            for tool in [
+                ActiveTool::Arrow,
+                ActiveTool::Line,
+                ActiveTool::Polyline,
+                ActiveTool::Arc,
+                ActiveTool::Rectangle,
+                ActiveTool::Ellipse,
+                ActiveTool::Polygon,
+                ActiveTool::Ink,
+                ActiveTool::Highlight,
+                ActiveTool::Stamp,
+                ActiveTool::Image,
+                ActiveTool::Legend,
+                ActiveTool::Snapshot,
+            ] {
+                if icon_button(
+                    ui,
+                    26.0,
+                    IconKind::from_tool(tool),
+                    active_tool == tool,
+                    has_doc,
+                    tool.label_es(),
+                    theme,
+                )
+                .clicked()
+                {
+                    actions.push(UiAction::SetTool(tool));
+                }
+            }
+        });
 
-        // Navigation
-        for tool in [ActiveTool::Select, ActiveTool::Pan, ActiveTool::ZoomWindow] {
+        toolbar_group(ui, theme, |ui| {
             if icon_button(
                 ui,
                 26.0,
-                IconKind::from_tool(tool),
-                active_tool == tool,
+                IconKind::Calibrate,
+                active_tool == ActiveTool::Calibrate,
                 has_doc,
-                tool.label_es(),
+                "Calibrar escala con 2 puntos",
                 theme,
             )
             .clicked()
             {
-                actions.push(UiAction::SetTool(tool));
+                actions.push(UiAction::StartTwoPointCalibration);
             }
-        }
-
-        ui.separator();
-
-        // Comments, Callouts, Clouds & Text (Priority workflow!)
-        for tool in [
-            ActiveTool::Note,
-            ActiveTool::TextBox,
-            ActiveTool::Typewriter,
-            ActiveTool::Callout,
-            ActiveTool::Cloud,
-            ActiveTool::CloudPlus,
-        ] {
-            if icon_button(
-                ui,
-                26.0,
-                IconKind::from_tool(tool),
-                active_tool == tool,
-                has_doc,
-                tool.label_es(),
-                theme,
-            )
-            .clicked()
-            {
-                actions.push(UiAction::SetTool(tool));
+            for tool in [
+                ActiveTool::MeasureLength,
+                ActiveTool::MeasurePolylength,
+                ActiveTool::MeasurePerimeter,
+                ActiveTool::MeasureArea,
+                ActiveTool::MeasureVolume,
+                ActiveTool::MeasureAngle,
+                ActiveTool::MeasureRadius,
+                ActiveTool::MeasureDiameter,
+                ActiveTool::MeasureCount,
+                ActiveTool::CutoutPoly,
+                ActiveTool::ViewportRegion,
+            ] {
+                if icon_button(
+                    ui,
+                    26.0,
+                    IconKind::from_tool(tool),
+                    active_tool == tool,
+                    has_doc,
+                    tool.label_es(),
+                    theme,
+                )
+                .clicked()
+                {
+                    actions.push(UiAction::SetTool(tool));
+                }
             }
-        }
-
-        ui.separator();
-
-        // Arrows, Shapes & Drawing
-        for tool in [
-            ActiveTool::Arrow,
-            ActiveTool::Line,
-            ActiveTool::Polyline,
-            ActiveTool::Arc,
-            ActiveTool::Rectangle,
-            ActiveTool::Ellipse,
-            ActiveTool::Polygon,
-            ActiveTool::Ink,
-            ActiveTool::Highlight,
-            ActiveTool::Stamp,
-            ActiveTool::Image,
-            ActiveTool::Legend,
-            ActiveTool::Snapshot,
-        ] {
-            if icon_button(
-                ui,
-                26.0,
-                IconKind::from_tool(tool),
-                active_tool == tool,
-                has_doc,
-                tool.label_es(),
-                theme,
-            )
-            .clicked()
-            {
-                actions.push(UiAction::SetTool(tool));
-            }
-        }
-
-        ui.separator();
-
-        // Calibration & Measurements
-        if icon_button(
-            ui,
-            26.0,
-            IconKind::Calibrate,
-            active_tool == ActiveTool::Calibrate,
-            has_doc,
-            "Calibrar escala con 2 puntos",
-            theme,
-        )
-        .clicked()
-        {
-            actions.push(UiAction::StartTwoPointCalibration);
-        }
-        for tool in [
-            ActiveTool::MeasureLength,
-            ActiveTool::MeasurePolylength,
-            ActiveTool::MeasurePerimeter,
-            ActiveTool::MeasureArea,
-            ActiveTool::MeasureVolume,
-            ActiveTool::MeasureAngle,
-            ActiveTool::MeasureRadius,
-            ActiveTool::MeasureDiameter,
-            ActiveTool::MeasureCount,
-            ActiveTool::CutoutPoly,
-            ActiveTool::ViewportRegion,
-        ] {
-            if icon_button(
-                ui,
-                26.0,
-                IconKind::from_tool(tool),
-                active_tool == tool,
-                has_doc,
-                tool.label_es(),
-                theme,
-            )
-            .clicked()
-            {
-                actions.push(UiAction::SetTool(tool));
-            }
-        }
+        });
     });
 }
 

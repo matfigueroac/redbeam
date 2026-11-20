@@ -1,4 +1,5 @@
 use crate::model::document::{BookmarkNode, DocumentTab, LayerItem};
+use crate::model::settings::AppSettings;
 use crate::model::tool_chest::ToolChest;
 use crate::model::units::{SheetDisplayUnit, format_page_dimensions};
 use crate::ui::actions::UiAction;
@@ -28,7 +29,7 @@ pub fn draw_left_panel(
     active_chest_item: Option<Uuid>,
     new_layer_name: &mut String,
     thumb_textures: &HashMap<(Uuid, usize), TextureHandle>,
-    sheet_unit: SheetDisplayUnit,
+    settings: &mut AppSettings,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
@@ -48,10 +49,27 @@ pub fn draw_left_panel(
 
     match active_tab {
         LeftPanelTab::ToolChest => {
-            draw_tool_chest_panel(ui, chest, chest_search, active_chest_item, theme, actions);
+            if draw_tool_chest_panel(
+                ui,
+                chest,
+                chest_search,
+                active_chest_item,
+                &mut settings.compact_tool_chest,
+                theme,
+                actions,
+            ) {
+                settings.save();
+            }
         }
         LeftPanelTab::Thumbnails => {
-            draw_thumbnails_panel(ui, tab, thumb_textures, sheet_unit, theme, actions);
+            draw_thumbnails_panel(
+                ui,
+                tab,
+                thumb_textures,
+                settings.sheet_display_unit,
+                theme,
+                actions,
+            );
         }
         LeftPanelTab::Layers => {
             draw_layers_panel(ui, tab, new_layer_name, theme);

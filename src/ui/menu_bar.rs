@@ -444,6 +444,10 @@ pub fn draw_menu_bar(
         });
 
         ui.menu_button("Ayuda", |ui| {
+            if ui.button("Paleta de comandos...  (Ctrl+K)").clicked() {
+                actions.push(UiAction::OpenDialog(DialogRequest::CommandPalette));
+                ui.close();
+            }
             if ui.button("Atajos de teclado").clicked() {
                 actions.push(UiAction::OpenDialog(DialogRequest::Shortcuts));
                 ui.close();
@@ -451,6 +455,24 @@ pub fn draw_menu_bar(
             if ui.button("Acerca de RedBIM").clicked() {
                 actions.push(UiAction::OpenDialog(DialogRequest::About));
                 ui.close();
+            }
+        });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("⌘ Paleta (Ctrl+K)")
+                            .size(11.0)
+                            .color(theme.text_muted),
+                    )
+                    .fill(theme.control_bg)
+                    .corner_radius(egui::CornerRadius::same(4)),
+                )
+                .on_hover_text("Buscar cualquier herramienta o comando rápido (Ctrl+K)")
+                .clicked()
+            {
+                actions.push(UiAction::OpenDialog(DialogRequest::CommandPalette));
             }
         });
     });

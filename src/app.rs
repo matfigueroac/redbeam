@@ -194,12 +194,17 @@ impl RedBimApp {
             clean_pdf_bytes: clean_bytes,
         });
         let page_count = tab.pages.len();
+        let raw_for_search = Arc::new(tab.raw_pdf_bytes.clone());
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
-        // Request initial renders for active page and thumbnails
+        // Request initial renders for active page, background thumbnails, & async search text
         for p in 0..page_count.min(20) {
             self.ensure_thumb_requested(doc_id, p);
         }
+        self.worker.send(RenderCommand::ExtractSearchText {
+            doc_id,
+            raw_pdf_bytes: raw_for_search,
+        });
         self.ensure_page_requested(doc_id, 0);
     }
 
@@ -209,6 +214,10 @@ impl RedBimApp {
             self.worker.send(RenderCommand::LoadDocument {
                 doc_id,
                 clean_pdf_bytes: clean,
+            });
+            self.worker.send(RenderCommand::ExtractSearchText {
+                doc_id,
+                raw_pdf_bytes: Arc::new(tab.raw_pdf_bytes.clone()),
             });
             self.base_textures.retain(|(id, _), _| *id != doc_id);
             self.thumb_textures.retain(|(id, _), _| *id != doc_id);
@@ -316,6 +325,14 @@ impl RedBimApp {
                 } => {
                     self.snap_indices.insert((doc_id, page_index), index);
                 }
+                RenderResult::SearchTextReady {
+                    doc_id,
+                    text_by_page,
+                } => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == doc_id) {
+                        tab.search_text_by_page = text_by_page;
+                    }
+                }
                 RenderResult::Error { message, .. } => {
                     self.show_toast(message);
                 }
@@ -392,6 +409,10 @@ impl RedBimApp {
             } else if ctrl && i.key_pressed(egui::Key::F) {
                 self.panels.right_open = true;
                 self.right_tab = RightPanelTab::Search;
+            } else if ctrl && i.key_pressed(egui::Key::K) {
+                actions.push(UiAction::OpenDialog(
+                    crate::ui::actions::DialogRequest::CommandPalette,
+                ));
             } else if ctrl && i.key_pressed(egui::Key::Num0) {
                 actions.push(UiAction::FitPage);
             } else if ctrl && i.key_pressed(egui::Key::Num1) {
@@ -864,7 +885,23 @@ impl RedBimApp {
                 UiAction::MarkupsStyleChanged => {}
                 UiAction::FitPage => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                        tab.active_camera_mut().fit_pending = true;
+                        let (vw, vh) = self.canvas.last_viewport_size;
+                        if vw > 30.0
+                            && vh > 30.0
+                            && let Some(p) = tab.active_page()
+                        {
+                            let margin = 28.0;
+                            let zx = (vw - margin * 2.0) / p.width_pt.max(1.0);
+                            let zy = (vh - margin * 2.0) / p.height_pt.max(1.0);
+                            let z = zx.min(zy).clamp(0.05, 8.0);
+                            let pad_x = ((vw - p.width_pt * z) * 0.5) / z;
+                            let pad_y = ((vh - p.height_pt * z) * 0.5) / z;
+                            let is_sec = tab.active_pane_secondary;
+                            tab.active_camera_mut().fit_pending = false;
+                            self.canvas.glide_to(is_sec, z, Point2::new(-pad_x, -pad_y));
+                        } else {
+                            tab.active_camera_mut().fit_pending = true;
+                        }
                     }
                 }
                 UiAction::FitWidth => {
@@ -872,25 +909,43 @@ impl RedBimApp {
                         let vw = self.canvas.last_viewport_size.0.max(100.0);
                         if let Some(p) = tab.active_page() {
                             let z = ((vw - 40.0) / p.width_pt.max(1.0)).clamp(0.05, 8.0);
-                            let cam = tab.active_camera_mut();
-                            cam.zoom = z;
-                            cam.pan = Point2::new(-20.0 / z, -12.0 / z);
-                            cam.fit_pending = false;
+                            let is_sec = tab.active_pane_secondary;
+                            tab.active_camera_mut().fit_pending = false;
+                            self.canvas
+                                .glide_to(is_sec, z, Point2::new(-20.0 / z, -12.0 / z));
                         }
                     }
                 }
                 UiAction::Zoom100 => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let (vw, vh) = self.canvas.last_viewport_size;
+                        let is_sec = tab.active_pane_secondary;
                         let cam = tab.active_camera_mut();
-                        cam.zoom = 1.0;
+                        let center = Point2::new(
+                            cam.pan.x + (vw * 0.5) / cam.zoom.max(0.05),
+                            cam.pan.y + (vh * 0.5) / cam.zoom.max(0.05),
+                        );
                         cam.fit_pending = false;
+                        let pan = Point2::new(center.x - vw * 0.5, center.y - vh * 0.5);
+                        self.canvas.glide_to(is_sec, 1.0, pan);
                     }
                 }
                 UiAction::ZoomStep(factor) => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let (vw, vh) = self.canvas.last_viewport_size;
+                        let is_sec = tab.active_pane_secondary;
                         let cam = tab.active_camera_mut();
-                        cam.zoom = (cam.zoom * factor).clamp(0.05, 16.0);
+                        let center = Point2::new(
+                            cam.pan.x + (vw * 0.5) / cam.zoom.max(0.05),
+                            cam.pan.y + (vh * 0.5) / cam.zoom.max(0.05),
+                        );
+                        let nz = (cam.zoom * factor).clamp(0.05, 16.0);
                         cam.fit_pending = false;
+                        let pan = Point2::new(
+                            center.x - (vw * 0.5) / nz,
+                            center.y - (vh * 0.5) / nz,
+                        );
+                        self.canvas.glide_to(is_sec, nz, pan);
                     }
                 }
                 UiAction::GoToPage(idx) => {
@@ -1519,7 +1574,7 @@ impl eframe::App for RedBimApp {
                         self.active_chest_item,
                         &mut self.new_layer_name,
                         &self.thumb_textures,
-                        self.settings.sheet_display_unit,
+                        &mut self.settings,
                         &self.theme,
                         &mut actions,
                     );
