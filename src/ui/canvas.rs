@@ -122,6 +122,7 @@ pub struct TileRequest {
 pub struct CanvasResources<'a> {
     pub base_textures: &'a HashMap<(Uuid, usize), TextureHandle>,
     pub tile_textures: &'a HashMap<(Uuid, usize), CachedTile>,
+    pub thumb_textures: &'a HashMap<(Uuid, usize), TextureHandle>,
     pub image_textures: &'a HashMap<Uuid, TextureHandle>,
     pub snap_indices: &'a HashMap<(Uuid, usize), SnapIndex>,
 }
@@ -340,13 +341,36 @@ fn draw_canvas_pane(
 
     // Base page raster texture
     let base_tex = res.base_textures.get(&(tab.id, page_idx));
+    let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     if let Some(tex) = base_tex {
-        painter.image(
-            tex.id(),
-            page_screen_rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        // Smooth fade-in of the crisp base render over the low-res preview
+        let fade = pane_ui
+            .ctx()
+            .animate_bool_with_time(egui::Id::unique(("base_fade", tab.id, page_idx)), true, 0.18);
+        if fade < 1.0
+            && let Some(thumb) = res.thumb_textures.get(&(tab.id, page_idx))
+        {
+            painter.image(thumb.id(), page_screen_rect, full_uv, Color32::WHITE);
+        }
+        painter.image(tex.id(), page_screen_rect, full_uv, Color32::WHITE.gamma_multiply(fade));
+    } else {
+        // Instant low-res preview while the high-quality page renders in background
+        if let Some(thumb) = res.thumb_textures.get(&(tab.id, page_idx)) {
+            painter.image(thumb.id(), page_screen_rect, full_uv, Color32::WHITE);
+        }
+        let t = pane_ui.input(|i| i.time) as f32;
+        let c = page_screen_rect.center();
+        let r = 14.0;
+        let start = t * 5.0;
+        let pts: Vec<Pos2> = (0..=24)
+            .map(|k| {
+                let a = start + k as f32 / 24.0 * std::f32::consts::PI * 1.4;
+                Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        painter.circle_filled(c, r + 8.0, Color32::from_rgba_unmultiplied(15, 23, 42, 150));
+        painter.add(egui::Shape::line(pts, Stroke::new(3.0, theme.accent_red)));
+        pane_ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     // High-resolution viewport tile when zoomed in deeply

@@ -396,6 +396,24 @@ impl RedBimApp {
                 actions.push(UiAction::FitPage);
             } else if ctrl && i.key_pressed(egui::Key::Num1) {
                 actions.push(UiAction::Zoom100);
+            } else if ctrl && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+                actions.push(UiAction::ZoomStep(1.25));
+            } else if ctrl && i.key_pressed(egui::Key::Minus) {
+                actions.push(UiAction::ZoomStep(0.8));
+            } else if i.key_pressed(egui::Key::PageDown) {
+                if let Some(t) = self.tabs.get(self.active_tab) {
+                    let p = t.active_page_index();
+                    if p + 1 < t.pages.len() {
+                        actions.push(UiAction::GoToPage(p + 1));
+                    }
+                }
+            } else if i.key_pressed(egui::Key::PageUp) {
+                if let Some(t) = self.tabs.get(self.active_tab) {
+                    let p = t.active_page_index();
+                    if p > 0 {
+                        actions.push(UiAction::GoToPage(p - 1));
+                    }
+                }
             } else if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 actions.push(UiAction::DeleteSelected);
             } else if !ctrl && !shift {
@@ -1308,9 +1326,19 @@ impl eframe::App for RedBimApp {
             let p0 = tab.camera.page_index;
             let p1 = tab.secondary_camera.page_index;
             let split = tab.split_mode;
+            let page_count = tab.pages.len();
             self.ensure_page_requested(doc_id, p0);
             if split != SplitViewMode::None {
                 self.ensure_page_requested(doc_id, p1);
+            }
+            // Prefetch neighbour pages once the current one is ready → instant page flips
+            if self.base_textures.contains_key(&(doc_id, p0)) {
+                if p0 + 1 < page_count {
+                    self.ensure_page_requested(doc_id, p0 + 1);
+                }
+                if p0 > 0 {
+                    self.ensure_page_requested(doc_id, p0 - 1);
+                }
             }
         }
 
@@ -1622,6 +1650,7 @@ impl eframe::App for RedBimApp {
                         CanvasResources {
                             base_textures: &self.base_textures,
                             tile_textures: &self.tile_textures,
+                            thumb_textures: &self.thumb_textures,
                             image_textures: &self.image_textures,
                             snap_indices: &self.snap_indices,
                         },
