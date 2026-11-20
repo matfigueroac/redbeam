@@ -1,50 +1,116 @@
-use crate::geometry::hit_test::box_rect_anchor;
+use crate::geometry::hit_test::{box_rect_anchor, markup_bounds};
 use crate::geometry::math::{
     Point2, Rect2, clip_hatch_lines, dimension_offset_segment, generate_cloud_polyline,
     polygon_centroid, sample_ellipse, sample_three_point_arc,
 };
-use crate::model::document::DocumentTab;
+use crate::model::document::{DocumentTab, PageModel};
 use crate::model::markup::{HatchPattern, LineEnd, LineStyle, Markup, MarkupKind};
+use crate::pdf::base64_decode;
 use crate::pdf::demo_blueprint::to_winansi_bytes;
 use lopdf::content::{Content, Operation};
-use lopdf::{Document, Object, Stream, dictionary};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy)]
+pub struct PdfOverlayResources {
+    pub font_reg: ObjectId,
+    pub font_bold: ObjectId,
+    pub gs_full: ObjectId,
+    pub gs_fill: ObjectId,
+    pub gs_hi: ObjectId,
+}
+
+impl PdfOverlayResources {
+    pub fn create(doc: &mut Document) -> Self {
+        let font_reg = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let font_bold = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica-Bold",
+            "Encoding" => "WinAnsiEncoding",
+        });
+        let gs_full = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "ca" => 1.0,
+            "CA" => 1.0,
+        });
+        let gs_fill = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "ca" => 0.25,
+            "CA" => 1.0,
+        });
+        let gs_hi = doc.add_object(dictionary! {
+            "Type" => "ExtGState",
+            "ca" => 0.42,
+            "CA" => 0.42,
+        });
+        Self {
+            font_reg,
+            font_bold,
+            gs_full,
+            gs_fill,
+            gs_hi,
+        }
+    }
+
+    pub fn into_dict(self, xobjects: Dictionary) -> Dictionary {
+        let mut res = dictionary! {
+            "Font" => dictionary! { "RB_F1" => self.font_reg, "RB_F2" => self.font_bold },
+            "ExtGState" => dictionary! { "RB_GS1" => self.gs_full, "RB_GSF" => self.gs_fill, "RB_GSH" => self.gs_hi },
+        };
+        if !xobjects.is_empty() {
+            res.set("XObject", xobjects);
+        }
+        res
+    }
+}
+
+/// Builds a standard ISO 32000-1 Form XObject Appearance Stream (`/AP << /N ... >>`)
+/// for any RedBIM markup or measurement so external PDF viewers render it natively.
+pub fn build_markup_appearance_stream(
+    doc: &mut Document,
+    res: &PdfOverlayResources,
+    m: &Markup,
+    page: &PageModel,
+    page_h: f64,
+) -> ObjectId {
+    let b = markup_bounds(m).expand(24.0);
+    let bbox = vec![
+        b.min_x.into(),
+        (page_h - b.max_y).into(),
+        b.max_x.into(),
+        (page_h - b.min_y).into(),
+    ];
+    let mut ops = Vec::new();
+    let mut xobjects = Dictionary::new();
+    draw_markup_pdf_ops(doc, &mut ops, &mut xobjects, m, page, page_h);
+    let content = Content { operations: ops }.encode().unwrap_or_default();
+    let mut stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "FormType" => 1i64,
+            "BBox" => bbox,
+            "Matrix" => vec![1.0.into(), 0.0.into(), 0.0.into(), 1.0.into(), 0.0.into(), 0.0.into()],
+            "Resources" => res.into_dict(xobjects),
+        },
+        content,
+    );
+    let _ = stream.compress();
+    doc.add_object(stream)
+}
+
 /// Flattens all RedBIM markups and measurements directly into the PDF page content streams
-/// (vectorial strokes, fills with ExtGState opacity, cloud scallops, hatches, callouts, stamps,
-/// and measurement labels) and clears `/Annots` for universal viewing.
+/// and clears `/Annots` for universal viewing.
 pub fn flatten_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
     let mut doc =
         Document::load_mem(&tab.raw_pdf_bytes).map_err(|e| format!("Error lopdf: {e}"))?;
-
-    // Shared font & ExtGState resources for flattened drawings
-    let font_reg = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
-    });
-    let font_bold = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica-Bold",
-        "Encoding" => "WinAnsiEncoding",
-    });
-    let gs_full = doc.add_object(dictionary! {
-        "Type" => "ExtGState",
-        "ca" => 1.0,
-        "CA" => 1.0,
-    });
-    let gs_fill = doc.add_object(dictionary! {
-        "Type" => "ExtGState",
-        "ca" => 0.25,
-        "CA" => 1.0,
-    });
-    let gs_hi = doc.add_object(dictionary! {
-        "Type" => "ExtGState",
-        "ca" => 0.42,
-        "CA" => 0.42,
-    });
+    let res = PdfOverlayResources::create(&mut doc);
 
     let pages = doc.get_pages();
     for (&page_num, &page_id) in &pages {
@@ -66,17 +132,17 @@ pub fn flatten_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
 
         let page_h = page_model.height_pt;
         let mut ops = Vec::new();
+        let mut xobjects = Dictionary::new();
         ops.push(Operation::new("q", vec![]));
 
         for m in page_markups {
-            draw_markup_pdf_ops(&mut ops, m, page_model, page_h);
+            draw_markup_pdf_ops(&mut doc, &mut ops, &mut xobjects, m, page_model, page_h);
         }
 
         ops.push(Operation::new("Q", vec![]));
         let overlay_bytes = Content { operations: ops }.encode().unwrap_or_default();
         let overlay_id = doc.add_object(Stream::new(dictionary! {}, overlay_bytes));
 
-        // Append overlay stream to page Contents and attach RedBIM font/GS resources
         let existing_contents = doc.get_page_contents(page_id);
         let mut new_contents: Vec<Object> = existing_contents
             .into_iter()
@@ -89,7 +155,6 @@ pub fn flatten_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
             page_dict.remove(b"Annots");
         }
 
-        // Ensure Resources has /Font /RB_F1, /RB_F2 and /ExtGState /RB_GS*
         let existing_res_id = doc
             .get_dictionary(page_id)
             .ok()
@@ -98,15 +163,15 @@ pub fn flatten_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
 
         if let Some(res_id) = existing_res_id {
             if let Ok(res_dict) = doc.get_dictionary_mut(res_id) {
-                inject_resources(res_dict, font_reg, font_bold, gs_full, gs_fill, gs_hi);
+                inject_resources(res_dict, &res, &xobjects);
             }
         } else if let Ok(page_dict) = doc.get_dictionary_mut(page_id) {
             if let Ok(Object::Dictionary(res_dict)) = page_dict.get_mut(b"Resources") {
-                inject_resources(res_dict, font_reg, font_bold, gs_full, gs_fill, gs_hi);
+                inject_resources(res_dict, &res, &xobjects);
             } else {
-                let mut res = dictionary! {};
-                inject_resources(&mut res, font_reg, font_bold, gs_full, gs_fill, gs_hi);
-                page_dict.set("Resources", res);
+                let mut res_dict = Dictionary::new();
+                inject_resources(&mut res_dict, &res, &xobjects);
+                page_dict.set("Resources", res_dict);
             }
         }
     }
@@ -122,36 +187,63 @@ pub fn flatten_pdf_file(tab: &DocumentTab, path: &Path) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("No se pudo escribir {}: {e}", path.display()))
 }
 
-fn inject_resources(
-    res: &mut lopdf::Dictionary,
-    f1: lopdf::ObjectId,
-    f2: lopdf::ObjectId,
-    gs_full: lopdf::ObjectId,
-    gs_fill: lopdf::ObjectId,
-    gs_hi: lopdf::ObjectId,
-) {
-    if let Ok(Object::Dictionary(fonts)) = res.get_mut(b"Font") {
-        fonts.set("RB_F1", f1);
-        fonts.set("RB_F2", f2);
+fn inject_resources(res_dict: &mut Dictionary, res: &PdfOverlayResources, xobjects: &Dictionary) {
+    if let Ok(Object::Dictionary(fonts)) = res_dict.get_mut(b"Font") {
+        fonts.set("RB_F1", res.font_reg);
+        fonts.set("RB_F2", res.font_bold);
     } else {
-        res.set("Font", dictionary! { "RB_F1" => f1, "RB_F2" => f2 });
-    }
-    if let Ok(Object::Dictionary(gs)) = res.get_mut(b"ExtGState") {
-        gs.set("RB_GS1", gs_full);
-        gs.set("RB_GSF", gs_fill);
-        gs.set("RB_GSH", gs_hi);
-    } else {
-        res.set(
-            "ExtGState",
-            dictionary! { "RB_GS1" => gs_full, "RB_GSF" => gs_fill, "RB_GSH" => gs_hi },
+        res_dict.set(
+            "Font",
+            dictionary! { "RB_F1" => res.font_reg, "RB_F2" => res.font_bold },
         );
+    }
+    if let Ok(Object::Dictionary(gs)) = res_dict.get_mut(b"ExtGState") {
+        gs.set("RB_GS1", res.gs_full);
+        gs.set("RB_GSF", res.gs_fill);
+        gs.set("RB_GSH", res.gs_hi);
+    } else {
+        res_dict.set(
+            "ExtGState",
+            dictionary! { "RB_GS1" => res.gs_full, "RB_GSF" => res.gs_fill, "RB_GSH" => res.gs_hi },
+        );
+    }
+    if !xobjects.is_empty() {
+        if let Ok(Object::Dictionary(xo)) = res_dict.get_mut(b"XObject") {
+            for (k, v) in xobjects.iter() {
+                xo.set(k.clone(), v.clone());
+            }
+        } else {
+            res_dict.set("XObject", xobjects.clone());
+        }
     }
 }
 
+fn embed_image_xobject(doc: &mut Document, png_b64: &str) -> Option<ObjectId> {
+    let raw = base64_decode(png_b64)?;
+    let dyn_img = image::load_from_memory(&raw).ok()?;
+    let rgb = dyn_img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => (w as i64),
+            "Height" => (h as i64),
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerComponent" => 8i64,
+        },
+        rgb.into_raw(),
+    );
+    let _ = stream.compress();
+    Some(doc.add_object(stream))
+}
+
 fn draw_markup_pdf_ops(
+    doc: &mut Document,
     ops: &mut Vec<Operation>,
+    xobjects: &mut Dictionary,
     m: &Markup,
-    page: &crate::model::document::PageModel,
+    page: &PageModel,
     page_h: f64,
 ) {
     let py = |y: f64| page_h - y;
@@ -276,7 +368,12 @@ fn draw_markup_pdf_ops(
     match &m.kind {
         MarkupKind::Note { pos } => {
             let r = Rect2::from_xywh(pos.x - 9.0, pos.y - 9.0, 18.0, 18.0);
-            emit_poly(ops, &r.corners(), true, m.style.fill_color.or(Some([250, 204, 21, 255])));
+            emit_poly(
+                ops,
+                &r.corners(),
+                true,
+                m.style.fill_color.or(Some([250, 204, 21, 255])),
+            );
         }
         MarkupKind::TextBox { rect, text } => {
             emit_poly(ops, &rect.corners(), true, m.style.fill_color);
@@ -366,12 +463,28 @@ fn draw_markup_pdf_ops(
             emit_poly(ops, &pts, true, m.style.fill_color);
         }
         MarkupKind::Polygon { points }
-        | MarkupKind::MeasurePerimeter { points, closed: true, .. }
-        | MarkupKind::SketchPoly { points, closed: true, .. } => {
+        | MarkupKind::MeasurePerimeter {
+            points,
+            closed: true,
+            ..
+        }
+        | MarkupKind::SketchPoly {
+            points,
+            closed: true,
+            ..
+        } => {
             emit_poly(ops, points, true, m.style.fill_color);
         }
-        MarkupKind::MeasurePerimeter { points, closed: false, .. }
-        | MarkupKind::SketchPoly { points, closed: false, .. } => {
+        MarkupKind::MeasurePerimeter {
+            points,
+            closed: false,
+            ..
+        }
+        | MarkupKind::SketchPoly {
+            points,
+            closed: false,
+            ..
+        } => {
             emit_poly(ops, points, false, None);
         }
         MarkupKind::MeasureArea {
@@ -477,12 +590,37 @@ fn draw_markup_pdf_ops(
                 emit_text(ops, p.x + 9.0, p.y + 3.0, 8.5, sc, &(i + 1).to_string());
             }
         }
-        MarkupKind::Legend { pos, title, width_pt } => {
+        MarkupKind::Legend {
+            pos,
+            title,
+            width_pt,
+        } => {
             let b = Rect2::from_xywh(pos.x, pos.y, *width_pt, 48.0);
             emit_poly(ops, &b.corners(), true, Some([245, 245, 248, 255]));
             emit_text(ops, pos.x + 8.0, pos.y + 18.0, 10.0, sc, title);
         }
-        MarkupKind::Image { rect, .. } => {
+        MarkupKind::Image { rect, png_b64, .. } => {
+            if let Some(img_id) = embed_image_xobject(doc, png_b64) {
+                let name = format!("RB_IM_{}", xobjects.len());
+                xobjects.set(name.as_bytes(), img_id);
+                ops.push(Operation::new("q", vec![]));
+                ops.push(Operation::new(
+                    "cm",
+                    vec![
+                        rect.width().into(),
+                        0.0.into(),
+                        0.0.into(),
+                        rect.height().into(),
+                        rect.min_x.into(),
+                        py(rect.max_y).into(),
+                    ],
+                ));
+                ops.push(Operation::new(
+                    "Do",
+                    vec![Object::Name(name.into_bytes())],
+                ));
+                ops.push(Operation::new("Q", vec![]));
+            }
             emit_poly(ops, &rect.corners(), true, None);
         }
     }

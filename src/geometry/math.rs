@@ -515,7 +515,7 @@ pub fn clip_hatch_lines(
             }
         }
         hits.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        for pair in hits.chunks_exact(2) {
+        for pair in hits.as_chunks::<2>().0 {
             let p0 = dir * pair[0] + norm * d;
             let p1 = dir * pair[1] + norm * d;
             if p0.dist(p1) > 0.5 {

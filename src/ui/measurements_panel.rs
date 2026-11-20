@@ -292,6 +292,11 @@ pub fn draw_measurements_panel(
                         if ui.small_button("✕").on_hover_text("Eliminar Viewport").clicked() {
                             actions.push(UiAction::DeleteViewport(vp.id));
                         }
+                        if ui.small_button("Editar").on_hover_text("Editar nombre y escala del Viewport").clicked() {
+                            actions.push(UiAction::OpenDialog(DialogRequest::EditViewport {
+                                viewport_id: vp.id,
+                            }));
+                        }
                     });
                 });
             }
@@ -359,6 +364,16 @@ pub fn draw_measurements_panel(
                             ui.label("Conteo:");
                             ui.label(RichText::new(format!("{} und", totals.total_count)).strong());
                             ui.end_row();
+
+                            if totals.total_cost > 0.0 {
+                                ui.label("Costo total:");
+                                ui.label(
+                                    RichText::new(format!("$ {:.0}", totals.total_cost))
+                                        .strong()
+                                        .color(theme.accent_green),
+                                );
+                                ui.end_row();
+                            }
                         });
                 });
         });

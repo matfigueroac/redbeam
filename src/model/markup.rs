@@ -557,6 +557,8 @@ pub struct Markup {
     pub modified_at: DateTime<Utc>,
     pub locked: bool,
     pub group_id: Option<Uuid>,
+    #[serde(default)]
+    pub unit_cost: Option<f64>,
     pub style: MarkupStyle,
     pub kind: MarkupKind,
 }
@@ -592,6 +594,7 @@ impl Markup {
             modified_at: now,
             locked: false,
             group_id: None,
+            unit_cost: None,
             style,
             kind,
         }
@@ -809,6 +812,9 @@ impl Markup {
                 let total = scale.polyline_length_meters(points, *closed);
                 out.perimeter_m = Some(total);
                 out.length_m = Some(total);
+                if opts.depth_meters > 0.0 {
+                    out.wall_area_m2 = Some(total * opts.depth_meters);
+                }
                 out.primary_display = Some(fmt_len(total));
                 if opts.show_segments && points.len() >= 2 {
                     for w in points.windows(2) {
@@ -938,6 +944,30 @@ impl Markup {
         }
 
         out
+    }
+
+    /// Computes total cost (`quantity_in_display_unit * unit_cost`) when `unit_cost` is assigned.
+    pub fn total_cost(&self, page_scale: &PageScale, viewports: &[ViewportScale]) -> Option<f64> {
+        let unit_cost = self.unit_cost?;
+        let anchor = self.anchor_point();
+        let scale = resolve_scale_at(page_scale, viewports, anchor);
+        let opts = self.measurement_opts();
+        let m = self.compute_metrics(page_scale, viewports);
+        let qty = if let Some(v) = m.volume_m3 {
+            let vu = opts.and_then(|o| o.volume_unit_override).unwrap_or(scale.volume_unit);
+            vu.from_cu_meters(v)
+        } else if let Some(a) = m.area_m2 {
+            let au = opts.and_then(|o| o.area_unit_override).unwrap_or(scale.area_unit);
+            au.from_sq_meters(a)
+        } else if let Some(l) = m.length_m {
+            let lu = opts.and_then(|o| o.length_unit_override).unwrap_or(scale.display_unit);
+            lu.from_meters(l)
+        } else if let Some(c) = m.count {
+            c as f64
+        } else {
+            1.0
+        };
+        Some(qty * unit_cost)
     }
 }
 

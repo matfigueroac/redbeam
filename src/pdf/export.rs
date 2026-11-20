@@ -33,6 +33,8 @@ pub fn export_markups_csv(tab: &DocumentTab, delimiter: CsvDelimiter) -> String 
         "Perímetro",
         "Conteo",
         "Ángulo / Pendiente",
+        "Precio Unitario",
+        "Total ($)",
         "Fecha modificación",
     ];
     out.push_str(&headers.join(&d.to_string()));
@@ -43,6 +45,7 @@ pub fn export_markups_csv(tab: &DocumentTab, delimiter: CsvDelimiter) -> String 
     let mut sum_vol_m3 = 0.0;
     let mut sum_perim_m = 0.0;
     let mut sum_count = 0usize;
+    let mut sum_cost = 0.0;
 
     for m in &tab.markups {
         let Some(page) = tab.pages.get(m.page_index) else {
@@ -88,6 +91,17 @@ pub fn export_markups_csv(tab: &DocumentTab, delimiter: CsvDelimiter) -> String 
             .angle_deg
             .map(|deg| format!("{deg:.1}°"))
             .unwrap_or_default();
+        let unit_cost_s = m
+            .unit_cost
+            .map(|u| format!("{u:.2}"))
+            .unwrap_or_default();
+        let total_cost_s = m
+            .total_cost(&page.scale, &page.viewports)
+            .map(|c| {
+                sum_cost += c;
+                format!("{c:.0}")
+            })
+            .unwrap_or_default();
 
         let row = [
             csv_escape(m.type_name_es(), d),
@@ -104,6 +118,8 @@ pub fn export_markups_csv(tab: &DocumentTab, delimiter: CsvDelimiter) -> String 
             csv_escape(&perim_s, d),
             count_s,
             csv_escape(&ang_s, d),
+            csv_escape(&unit_cost_s, d),
+            csv_escape(&total_cost_s, d),
             m.modified_at.format("%Y-%m-%d %H:%M").to_string(),
         ];
         out.push_str(&row.join(&d.to_string()));
@@ -127,6 +143,8 @@ pub fn export_markups_csv(tab: &DocumentTab, delimiter: CsvDelimiter) -> String 
             csv_escape(&format_length(sum_perim_m, s.display_unit, s.precision), d),
             sum_count.to_string(),
             String::new(),
+            String::new(),
+            format!("{sum_cost:.0}"),
             String::new(),
         ];
         out.push_str(&tot_row.join(&d.to_string()));
@@ -152,9 +170,10 @@ pub fn export_markups_json_file(tab: &DocumentTab, path: &Path) -> Result<(), St
 }
 
 pub fn import_markups_json_file(tab: &mut DocumentTab, path: &Path) -> Result<usize, String> {
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| format!("No se pudo leer {}: {e}", path.display()))?;
-    let imported: Vec<Markup> = serde_json::from_str(&raw).map_err(|e| format!("JSON inválido: {e}"))?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("No se pudo leer {}: {e}", path.display()))?;
+    let imported: Vec<Markup> =
+        serde_json::from_str(&raw).map_err(|e| format!("JSON inválido: {e}"))?;
     let count = imported.len();
     tab.push_undo();
     for mut m in imported {

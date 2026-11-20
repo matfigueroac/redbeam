@@ -6,18 +6,24 @@ use crate::model::markup::{Markup, MarkupKind, MarkupStyle, MeasurementOptions};
 use crate::model::settings::{AppSettings, ThemeMode};
 use crate::model::tool_chest::{ActiveTool, ToolChest};
 use crate::model::units::PT_PER_MM;
+use crate::pdf::compare::compare_pdf_pages;
 use crate::pdf::demo_blueprint::create_blank_pdf_bytes;
 use crate::pdf::export::{
     export_markups_csv_file, export_markups_json_file, import_markups_json_file,
 };
-use crate::pdf::flatten::flatten_pdf_file;
+use crate::pdf::flatten::{flatten_pdf_file, flatten_pdf_to_bytes};
 use crate::pdf::io::{
-    delete_page_in_doc, insert_blank_page_in_doc, open_demo_chile_document, open_pdf_file,
-    open_pdf_from_bytes, rotate_page_in_doc, save_pdf_file, strip_annots_for_render,
+    combine_pdf_files, delete_page_in_doc, extract_pages_to_pdf, insert_blank_page_in_doc,
+    open_demo_chile_document, open_pdf_file, open_pdf_from_bytes, rotate_page_in_doc,
+    save_pdf_file, strip_annots_for_render,
 };
-use crate::pdf::renderer::{PdfRenderWorker, RenderCommand, RenderResult};
+use crate::pdf::renderer::{
+    PdfRenderWorker, RenderCommand, RenderResult, default_interpreter_settings, render_tile_rgba,
+};
 use crate::ui::actions::UiAction;
-use crate::ui::canvas::{CachedTile, CanvasState, TileRequest, draw_document_workspace};
+use crate::ui::canvas::{
+    CachedTile, CanvasResources, CanvasState, TileRequest, draw_document_workspace,
+};
 use crate::ui::dialogs::{ActiveModal, draw_active_modal};
 use crate::ui::icons::{IconKind, icon_button};
 use crate::ui::left_panels::{LeftPanelTab, draw_left_panel};
@@ -82,6 +88,8 @@ pub struct RedBimApp {
     pub base_textures: HashMap<(Uuid, usize), TextureHandle>,
     pub thumb_textures: HashMap<(Uuid, usize), TextureHandle>,
     pub tile_textures: HashMap<(Uuid, usize), CachedTile>,
+    pub image_textures: HashMap<Uuid, TextureHandle>,
+    pub failed_image_textures: HashSet<Uuid>,
     pub snap_indices: HashMap<(Uuid, usize), SnapIndex>,
     pub requested_base: HashSet<(Uuid, usize)>,
     pub requested_thumbs: HashSet<(Uuid, usize)>,
@@ -143,6 +151,8 @@ impl RedBimApp {
             base_textures: HashMap::new(),
             thumb_textures: HashMap::new(),
             tile_textures: HashMap::new(),
+            image_textures: HashMap::new(),
+            failed_image_textures: HashSet::new(),
             snap_indices: HashMap::new(),
             requested_base: HashSet::new(),
             requested_thumbs: HashSet::new(),
@@ -155,10 +165,8 @@ impl RedBimApp {
             screenshot_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
-        if launch.demo {
-            if let Ok(tab) = open_demo_chile_document() {
-                app.add_and_activate_tab(tab);
-            }
+        if launch.demo && let Ok(tab) = open_demo_chile_document() {
+            app.add_and_activate_tab(tab);
         }
         for path in launch.files {
             if let Ok(tab) = open_pdf_file(&path) {
@@ -310,6 +318,42 @@ impl RedBimApp {
         self.toast = Some((msg.into(), Instant::now()));
     }
 
+    fn ensure_image_textures(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let to_decode: Vec<(Uuid, String)> = tab
+            .markups
+            .iter()
+            .filter_map(|m| {
+                if let MarkupKind::Image { png_b64, .. } = &m.kind
+                    && !png_b64.is_empty()
+                    && !self.image_textures.contains_key(&m.id)
+                    && !self.failed_image_textures.contains(&m.id)
+                {
+                    Some((m.id, png_b64.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (id, b64) in to_decode {
+            let decoded = crate::pdf::base64_decode(&b64)
+                .and_then(|raw| image::load_from_memory(&raw).ok())
+                .map(|img| img.to_rgba8());
+            if let Some(rgba) = decoded {
+                let w = rgba.width() as usize;
+                let h = rgba.height() as usize;
+                let ci = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+                let tex = ctx.load_texture(format!("img_{id}"), ci, TextureOptions::LINEAR);
+                self.image_textures.insert(id, tex);
+            } else {
+                self.failed_image_textures.insert(id);
+            }
+        }
+    }
+
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<UiAction>) {
         if ctx.egui_wants_keyboard_input() || self.modal.is_some() || self.canvas.inline_edit.is_some() {
             return;
@@ -362,6 +406,7 @@ impl RedBimApp {
                     (egui::Key::P, ActiveTool::Polygon),
                     (egui::Key::H, ActiveTool::Highlight),
                     (egui::Key::S, ActiveTool::Stamp),
+                    (egui::Key::G, ActiveTool::Snapshot),
                 ];
                 for (k, t) in single_map {
                     if i.key_pressed(k) {
@@ -549,9 +594,90 @@ impl RedBimApp {
                         }
                     }
                 }
+                UiAction::CombinePdfs => {
+                    if let Some(paths) = rfd::FileDialog::new()
+                        .add_filter("Documentos PDF", &["pdf"])
+                        .pick_files()
+                    {
+                        if paths.len() < 2 {
+                            self.show_toast("Seleccione al menos 2 archivos PDF para combinar");
+                        } else {
+                            match combine_pdf_files(&paths).and_then(|bytes| {
+                                open_pdf_from_bytes("Combinado_RedBIM.pdf", None, bytes)
+                            }) {
+                                Ok(new_tab) => {
+                                    let total_p = new_tab.pages.len();
+                                    self.add_and_activate_tab(new_tab);
+                                    self.show_toast(format!(
+                                        "PDF combinado creado ({total_p} páginas)"
+                                    ));
+                                }
+                                Err(e) => self.show_toast(e),
+                            }
+                        }
+                    }
+                }
+                UiAction::CompareWithPdf => {
+                    let source = self
+                        .tabs
+                        .get(self.active_tab)
+                        .map(|t| (t.raw_pdf_bytes.clone(), t.active_page_index()));
+                    if let Some((bytes_a, page_a)) = source
+                        && let Some(path_b) = rfd::FileDialog::new()
+                            .add_filter("Documento PDF revisión B", &["pdf"])
+                            .pick_file()
+                    {
+                        match std::fs::read(&path_b)
+                            .map_err(|e| format!("No se pudo leer PDF B: {e}"))
+                            .and_then(|bytes_b| {
+                                let page_b = lopdf::Document::load_mem(&bytes_b)
+                                    .map(|d| page_a.min(d.get_pages().len().saturating_sub(1)))
+                                    .unwrap_or(0);
+                                compare_pdf_pages(&bytes_a, page_a, &bytes_b, page_b, 1800)
+                            }) {
+                            Ok((diff_tab, report)) => {
+                                self.add_and_activate_tab(diff_tab);
+                                self.show_toast(format!(
+                                    "Comparación completada: {} región(es) con cambios",
+                                    report.diff_regions_count
+                                ));
+                            }
+                            Err(e) => self.show_toast(e),
+                        }
+                    }
+                }
+                UiAction::ExtractCurrentPage => {
+                    if let Some(tab) = self.tabs.get(self.active_tab) {
+                        let pg = tab.active_page_index();
+                        let default_name = format!("Pagina_{}_RedBIM.pdf", pg + 1);
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PDF", &["pdf"])
+                            .set_file_name(&default_name)
+                            .save_file()
+                        {
+                            match extract_pages_to_pdf(tab, &[pg])
+                                .and_then(|bytes| {
+                                    std::fs::write(&path, bytes)
+                                        .map_err(|e| format!("Error guardando extracción: {e}"))
+                                }) {
+                                Ok(()) => self.show_toast(format!(
+                                    "Página {} extraída correctamente",
+                                    pg + 1
+                                )),
+                                Err(e) => self.show_toast(e),
+                            }
+                        }
+                    }
+                }
                 UiAction::CloseTab(idx) => {
                     if idx < self.tabs.len() {
                         let doc_id = self.tabs[idx].id;
+                        let markup_ids: Vec<Uuid> =
+                            self.tabs[idx].markups.iter().map(|m| m.id).collect();
+                        for mid in markup_ids {
+                            self.image_textures.remove(&mid);
+                            self.failed_image_textures.remove(&mid);
+                        }
                         self.worker.send(RenderCommand::CloseDocument { doc_id });
                         self.tabs.remove(idx);
                         self.base_textures.retain(|(id, _), _| *id != doc_id);
@@ -644,6 +770,13 @@ impl RedBimApp {
                 UiAction::UngroupSelected => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.ungroup_selected();
+                    }
+                }
+                UiAction::AlignSelected(kind) => {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab)
+                        && tab.align_selected(kind)
+                    {
+                        self.show_toast("Marcas alineadas");
                     }
                 }
                 UiAction::BringToFront => {
@@ -866,6 +999,107 @@ impl RedBimApp {
                         self.show_toast(format!("Escala aplicada: {}", scale.label()));
                     }
                 }
+                UiAction::ApplyScaleToRange { scale, pages } => {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.push_undo();
+                        let mut applied = 0usize;
+                        for idx in pages {
+                            if let Some(p) = tab.pages.get_mut(idx) {
+                                p.scale = scale.clone();
+                                applied += 1;
+                            }
+                        }
+                        self.show_toast(format!(
+                            "Escala {} aplicada a {applied} página(s)",
+                            scale.label()
+                        ));
+                    }
+                }
+                UiAction::SaveViewportEdit { id, name, scale } => {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.push_undo();
+                        for p in &mut tab.pages {
+                            if let Some(vp) = p.viewports.iter_mut().find(|v| v.id == id) {
+                                vp.name = name.clone();
+                                vp.scale = scale.clone();
+                                break;
+                            }
+                        }
+                        self.show_toast("Viewport actualizado");
+                    }
+                }
+                UiAction::CaptureSnapshot(rect_pt) => {
+                    if let Some(tab) = self.tabs.get(self.active_tab) {
+                        let pg = tab.active_page_index();
+                        let render_bytes = flatten_pdf_to_bytes(tab)
+                            .unwrap_or_else(|_| strip_annots_for_render(&tab.raw_pdf_bytes));
+                        let max_dim = rect_pt.width().max(rect_pt.height()).max(1.0);
+                        let scale = 2.5_f64.min(1800.0 / max_dim);
+                        let out_w = ((rect_pt.width() * scale).round() as u32).clamp(32, 1800) as u16;
+                        let out_h =
+                            ((rect_pt.height() * scale).round() as u32).clamp(32, 1800) as u16;
+                        match render_tile_rgba(
+                            &render_bytes,
+                            pg,
+                            rect_pt,
+                            out_w,
+                            out_h,
+                            &default_interpreter_settings(),
+                            &hayro::RenderSettings::default(),
+                        ) {
+                            Ok(img) => {
+                                let mut straight = Vec::with_capacity(img.premul_rgba.len());
+                                for px in img.premul_rgba.as_chunks::<4>().0 {
+                                    let a = px[3];
+                                    if a == 0 {
+                                        straight.extend_from_slice(&[0, 0, 0, 0]);
+                                    } else if a == 255 {
+                                        straight.extend_from_slice(px);
+                                    } else {
+                                        let af = a as u32;
+                                        straight.push(((px[0] as u32 * 255) / af).min(255) as u8);
+                                        straight.push(((px[1] as u32 * 255) / af).min(255) as u8);
+                                        straight.push(((px[2] as u32 * 255) / af).min(255) as u8);
+                                        straight.push(a);
+                                    }
+                                }
+                                ctx.copy_image(ColorImage::from_rgba_unmultiplied(
+                                    [img.width, img.height],
+                                    &straight,
+                                ));
+                                if let Some(rgba_img) = image::RgbaImage::from_raw(
+                                    img.width as u32,
+                                    img.height as u32,
+                                    straight,
+                                ) {
+                                    let mut png_bytes = Vec::new();
+                                    let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                                    if image::DynamicImage::ImageRgba8(rgba_img)
+                                        .write_to(&mut cursor, image::ImageFormat::Png)
+                                        .is_ok()
+                                    {
+                                        let snap_m = Markup::new(
+                                            pg,
+                                            "Instantánea",
+                                            &self.settings.author_name,
+                                            self.default_style.clone(),
+                                            MarkupKind::Image {
+                                                rect: rect_pt,
+                                                png_b64: crate::pdf::base64_encode(&png_bytes),
+                                                caption: "Instantánea".to_string(),
+                                            },
+                                        );
+                                        self.clipboard = vec![snap_m];
+                                    }
+                                }
+                                self.show_toast(
+                                    "Instantánea copiada al portapapeles (Ctrl+V para pegar)",
+                                );
+                            }
+                            Err(e) => self.show_toast(e),
+                        }
+                    }
+                }
                 UiAction::StartTwoPointCalibration => {
                     self.active_tool = ActiveTool::Calibrate;
                     self.canvas.creation = None;
@@ -1031,6 +1265,7 @@ impl eframe::App for RedBimApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.process_worker_results(&ctx);
+        self.ensure_image_textures(&ctx);
 
         // Handle dropped PDFs
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -1315,9 +1550,12 @@ impl eframe::App for RedBimApp {
                         &self.default_style,
                         &self.default_meas_opts,
                         &self.settings,
-                        &self.base_textures,
-                        &self.tile_textures,
-                        &self.snap_indices,
+                        CanvasResources {
+                            base_textures: &self.base_textures,
+                            tile_textures: &self.tile_textures,
+                            image_textures: &self.image_textures,
+                            snap_indices: &self.snap_indices,
+                        },
                         &self.theme,
                         &mut actions,
                         &mut tile_requests,

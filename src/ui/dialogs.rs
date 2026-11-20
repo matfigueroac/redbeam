@@ -1,12 +1,20 @@
 use crate::geometry::math::{Point2, Rect2};
 use crate::model::document::DocumentTab;
 use crate::model::markup::{Markup, MarkupKind, MarkupStyle, MeasurementOptions};
-use crate::model::scale::{IMPERIAL_PRESETS, METRIC_PRESETS, PageScale};
+use crate::model::scale::{IMPERIAL_PRESETS, METRIC_PRESETS, PageScale, parse_page_range};
 use crate::model::settings::{AppSettings, CsvDelimiter, ThemeMode};
 use crate::model::units::{LengthUnit, PT_PER_MM, Precision, SheetDisplayUnit, UnitSystem};
 use crate::ui::actions::{DialogRequest, UiAction};
 use crate::ui::theme::RedBimTheme;
 use eframe::egui::{self, RichText};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalePageScope {
+    Current,
+    Range,
+    All,
+}
 
 #[derive(Debug, Clone)]
 pub enum ActiveModal {
@@ -14,15 +22,24 @@ pub enum ActiveModal {
         measured_pts: f64,
         known_value_str: String,
         unit: LengthUnit,
-        apply_all_pages: bool,
+        page_scope: ScalePageScope,
+        page_range_str: String,
     },
     SetScale {
         draft: PageScale,
-        apply_all_pages: bool,
+        page_scope: ScalePageScope,
+        page_range_str: String,
         custom_paper_str: String,
         custom_real_str: String,
         custom_y_paper_str: String,
         custom_y_real_str: String,
+    },
+    EditViewport {
+        viewport_id: Uuid,
+        name: String,
+        draft: PageScale,
+        custom_paper_str: String,
+        custom_real_str: String,
     },
     SketchToScale {
         width_str: String,
@@ -53,7 +70,12 @@ impl ActiveModal {
                 measured_pts,
                 known_value_str: initial_value,
                 unit,
-                apply_all_pages,
+                page_scope: if apply_all_pages {
+                    ScalePageScope::All
+                } else {
+                    ScalePageScope::Current
+                },
+                page_range_str: "1-2".to_string(),
             },
             DialogRequest::SetScale => {
                 let draft = tab
@@ -66,7 +88,26 @@ impl ActiveModal {
                     custom_y_paper_str: format!("{:.3}", draft.y_paper_value),
                     custom_y_real_str: format!("{:.3}", draft.y_real_value),
                     draft,
-                    apply_all_pages: false,
+                    page_scope: ScalePageScope::Current,
+                    page_range_str: "1-2".to_string(),
+                }
+            }
+            DialogRequest::EditViewport { viewport_id } => {
+                let vp = tab
+                    .and_then(|t| t.active_page())
+                    .and_then(|p| p.viewports.iter().find(|v| v.id == viewport_id));
+                let name = vp
+                    .map(|v| v.name.clone())
+                    .unwrap_or_else(|| "Detalle".to_string());
+                let draft = vp
+                    .map(|v| v.scale.clone())
+                    .unwrap_or_else(|| PageScale::from_metric_ratio(50.0));
+                Self::EditViewport {
+                    viewport_id,
+                    name,
+                    custom_paper_str: format!("{:.3}", draft.paper_value),
+                    custom_real_str: format!("{:.3}", draft.real_value),
+                    draft,
                 }
             }
             DialogRequest::SketchToScale => Self::SketchToScale {
@@ -102,6 +143,7 @@ pub fn draw_active_modal(
     let Some(mut modal) = modal_slot.take() else {
         return;
     };
+    let total_pages = tab.as_deref().map(|t| t.pages.len()).unwrap_or(1);
     let mut keep_open = true;
     let mut close_clicked = false;
 
@@ -110,7 +152,8 @@ pub fn draw_active_modal(
             measured_pts,
             known_value_str,
             unit,
-            apply_all_pages,
+            page_scope,
+            page_range_str,
         } => {
             egui::Window::new("Calibrar escala (2 puntos)")
                 .collapsible(false)
@@ -153,7 +196,8 @@ pub fn draw_active_modal(
                                 .color(theme.accent_green),
                         );
                     }
-                    ui.checkbox(apply_all_pages, "Aplicar escala a todas las páginas");
+                    ui.add_space(4.0);
+                    draw_scale_scope_selector(ui, "cal", page_scope, page_range_str, total_pages);
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui
@@ -163,10 +207,7 @@ pub fn draw_active_modal(
                             && val > 0.0
                         {
                             let s = PageScale::from_calibration(*measured_pts, val, *unit);
-                            actions.push(UiAction::ApplyPageScale {
-                                scale: s,
-                                apply_all: *apply_all_pages,
-                            });
+                            emit_scale_action(s, *page_scope, page_range_str, total_pages, actions);
                             close_clicked = true;
                         }
                         if ui.button("Cancelar").clicked() {
@@ -178,7 +219,8 @@ pub fn draw_active_modal(
 
         ActiveModal::SetScale {
             draft,
-            apply_all_pages,
+            page_scope,
+            page_range_str,
             custom_paper_str,
             custom_real_str,
             custom_y_paper_str,
@@ -200,64 +242,13 @@ pub fn draw_active_modal(
                             }
                         });
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        for p in METRIC_PRESETS {
-                            let sel = draft.is_set
-                                && draft.paper_unit.is_metric()
-                                && (draft.ratio_x() - p.real_value).abs() < 0.05;
-                            if ui.selectable_label(sel, p.label).clicked() {
-                                let keep_disp = draft.display_unit;
-                                let keep_area = draft.area_unit;
-                                let keep_vol = draft.volume_unit;
-                                *draft = PageScale::from_preset(p);
-                                if keep_disp.is_metric() {
-                                    draft.display_unit = keep_disp;
-                                    draft.area_unit = keep_area;
-                                    draft.volume_unit = keep_vol;
-                                }
-                                *custom_paper_str = format!("{}", draft.paper_value);
-                                *custom_real_str = format!("{}", draft.real_value);
-                            }
-                        }
-                    });
-
-                    ui.add_space(4.0);
-                    egui::ComboBox::from_id_salt("dlg_imp_presets")
-                        .selected_text("Escalas Imperiales (EE.UU.)...")
-                        .width(260.0)
-                        .show_ui(ui, |ui| {
-                            for p in IMPERIAL_PRESETS {
-                                if ui.button(p.label).clicked() {
-                                    *draft = PageScale::from_preset(p);
-                                    *custom_paper_str = format!("{}", draft.paper_value);
-                                    *custom_real_str = format!("{}", draft.real_value);
-                                }
-                            }
-                        });
-
-                    ui.separator();
-                    ui.label(RichText::new("Escala personalizada").strong());
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(custom_paper_str).desired_width(60.0));
-                        egui::ComboBox::from_id_salt("dlg_paper_u")
-                            .selected_text(draft.paper_unit.suffix())
-                            .width(75.0)
-                            .show_ui(ui, |ui| {
-                                for &u in LengthUnit::ALL {
-                                    ui.selectable_value(&mut draft.paper_unit, u, u.suffix());
-                                }
-                            });
-                        ui.label("=");
-                        ui.add(egui::TextEdit::singleline(custom_real_str).desired_width(70.0));
-                        egui::ComboBox::from_id_salt("dlg_real_u")
-                            .selected_text(draft.real_unit.suffix())
-                            .width(75.0)
-                            .show_ui(ui, |ui| {
-                                for &u in LengthUnit::ALL {
-                                    ui.selectable_value(&mut draft.real_unit, u, u.suffix());
-                                }
-                            });
-                    });
+                    draw_scale_presets_and_custom(
+                        ui,
+                        "dlg",
+                        draft,
+                        custom_paper_str,
+                        custom_real_str,
+                    );
 
                     ui.checkbox(&mut draft.separate_xy, "Escala vertical (Y) independiente");
                     if draft.separate_xy {
@@ -291,7 +282,8 @@ pub fn draw_active_modal(
                                 }
                             });
                     });
-                    ui.checkbox(apply_all_pages, "Aplicar a todas las páginas del documento");
+                    ui.add_space(4.0);
+                    draw_scale_scope_selector(ui, "dlg", page_scope, page_range_str, total_pages);
 
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -299,30 +291,95 @@ pub fn draw_active_modal(
                             .add(egui::Button::new("Aceptar").fill(theme.accent_red))
                             .clicked()
                         {
-                            if let (Ok(pv), Ok(rv)) = (
-                                custom_paper_str.trim().replace(',', ".").parse::<f64>(),
-                                custom_real_str.trim().replace(',', ".").parse::<f64>(),
-                            ) && pv > 0.0
-                                && rv > 0.0
-                            {
-                                draft.paper_value = pv;
-                                draft.real_value = rv;
-                                draft.is_set = true;
-                            }
-                            if draft.separate_xy
-                                && let (Ok(ypv), Ok(yrv)) = (
-                                    custom_y_paper_str.trim().replace(',', ".").parse::<f64>(),
-                                    custom_y_real_str.trim().replace(',', ".").parse::<f64>(),
-                                )
-                                && ypv > 0.0
-                                && yrv > 0.0
-                            {
-                                draft.y_paper_value = ypv;
-                                draft.y_real_value = yrv;
-                            }
-                            actions.push(UiAction::ApplyPageScale {
+                            apply_custom_strings_to_draft(
+                                draft,
+                                custom_paper_str,
+                                custom_real_str,
+                                Some((custom_y_paper_str.as_str(), custom_y_real_str.as_str())),
+                            );
+                            emit_scale_action(
+                                draft.clone(),
+                                *page_scope,
+                                page_range_str,
+                                total_pages,
+                                actions,
+                            );
+                            close_clicked = true;
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            close_clicked = true;
+                        }
+                    });
+                });
+        }
+
+        ActiveModal::EditViewport {
+            viewport_id,
+            name,
+            draft,
+            custom_paper_str,
+            custom_real_str,
+        } => {
+            egui::Window::new("Editar Viewport")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(450.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Nombre del Viewport:");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
+                    });
+                    ui.separator();
+                    ui.label(RichText::new("Escala local del Viewport:").strong());
+                    draw_scale_presets_and_custom(
+                        ui,
+                        "vp",
+                        draft,
+                        custom_paper_str,
+                        custom_real_str,
+                    );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Mostrar en:");
+                        egui::ComboBox::from_id_salt("vp_disp_u")
+                            .selected_text(draft.display_unit.display_name())
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                for &u in LengthUnit::ALL {
+                                    ui.selectable_value(&mut draft.display_unit, u, u.display_name());
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("vp_prec_u")
+                            .selected_text(draft.precision.label())
+                            .width(120.0)
+                            .show_ui(ui, |ui| {
+                                for &pr in Precision::ALL {
+                                    ui.selectable_value(&mut draft.precision, pr, pr.label());
+                                }
+                            });
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new("Guardar Viewport").fill(theme.accent_red))
+                            .clicked()
+                        {
+                            apply_custom_strings_to_draft(
+                                draft,
+                                custom_paper_str,
+                                custom_real_str,
+                                None,
+                            );
+                            actions.push(UiAction::SaveViewportEdit {
+                                id: *viewport_id,
+                                name: if name.trim().is_empty() {
+                                    "Detalle".to_string()
+                                } else {
+                                    name.trim().to_string()
+                                },
                                 scale: draft.clone(),
-                                apply_all: *apply_all_pages,
                             });
                             close_clicked = true;
                         }
@@ -638,6 +695,7 @@ pub fn draw_active_modal(
                         ("R / E / P", "Rectángulo / Elipse / Polígono"),
                         ("H / S", "Resaltador / Sello"),
                         ("Shift+L / Shift+A / Shift+V", "Medir Longitud / Área / Volumen"),
+                        ("G", "Instantánea (captura región PNG al portapapeles)"),
                         ("1 .. 8", "Herramientas rápidas de Mis herramientas"),
                         ("Shift (al dibujar)", "Bloqueo ortogonal 45° / 90°"),
                         ("Doble clic en texto", "Editar texto directamente en el plano"),
@@ -670,7 +728,7 @@ pub fn draw_active_modal(
                 .open(&mut keep_open)
                 .show(ctx, |ui| {
                     ui.label(
-                        RichText::new("RedBIM v0.1.0")
+                        RichText::new("RedBIM v0.2.0")
                             .strong()
                             .size(18.0)
                             .color(theme.accent_red),
@@ -692,4 +750,166 @@ pub fn draw_active_modal(
         *modal_slot = Some(modal);
     }
     let _ = Point2::default();
+}
+
+fn draw_scale_scope_selector(
+    ui: &mut egui::Ui,
+    id_prefix: &str,
+    scope: &mut ScalePageScope,
+    range_str: &mut String,
+    total_pages: usize,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Aplicar a:");
+        ui.radio_value(scope, ScalePageScope::Current, "Página actual");
+        ui.radio_value(scope, ScalePageScope::Range, "Rango");
+        ui.radio_value(scope, ScalePageScope::All, "Todas");
+    });
+    if *scope == ScalePageScope::Range {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(range_str)
+                    .id(egui::Id::unique(format!("{id_prefix}_range_edit")))
+                    .desired_width(130.0)
+                    .hint_text("Ej: 1, 3-5"),
+            );
+            let parsed = parse_page_range(range_str, total_pages);
+            let summary = if parsed.is_empty() {
+                format!("Sin páginas válidas (1..{total_pages})")
+            } else {
+                format!("{} página(s) seleccionada(s)", parsed.len())
+            };
+            ui.label(RichText::new(summary).size(11.0));
+        });
+    }
+}
+
+fn emit_scale_action(
+    scale: PageScale,
+    scope: ScalePageScope,
+    range_str: &str,
+    total_pages: usize,
+    actions: &mut Vec<UiAction>,
+) {
+    match scope {
+        ScalePageScope::Current => actions.push(UiAction::ApplyPageScale {
+            scale,
+            apply_all: false,
+        }),
+        ScalePageScope::All => actions.push(UiAction::ApplyPageScale {
+            scale,
+            apply_all: true,
+        }),
+        ScalePageScope::Range => {
+            let pages = parse_page_range(range_str, total_pages);
+            if pages.is_empty() {
+                actions.push(UiAction::ShowToast(
+                    "Rango de páginas inválido; se aplicó a página actual.".to_string(),
+                ));
+                actions.push(UiAction::ApplyPageScale {
+                    scale,
+                    apply_all: false,
+                });
+            } else {
+                actions.push(UiAction::ApplyScaleToRange { scale, pages });
+            }
+        }
+    }
+}
+
+fn draw_scale_presets_and_custom(
+    ui: &mut egui::Ui,
+    id_prefix: &str,
+    draft: &mut PageScale,
+    custom_paper_str: &mut String,
+    custom_real_str: &mut String,
+) {
+    ui.horizontal_wrapped(|ui| {
+        for p in METRIC_PRESETS {
+            let sel = draft.is_set
+                && draft.paper_unit.is_metric()
+                && (draft.ratio_x() - p.real_value).abs() < 0.05;
+            if ui.selectable_label(sel, p.label).clicked() {
+                let keep_disp = draft.display_unit;
+                let keep_area = draft.area_unit;
+                let keep_vol = draft.volume_unit;
+                *draft = PageScale::from_preset(p);
+                if keep_disp.is_metric() {
+                    draft.display_unit = keep_disp;
+                    draft.area_unit = keep_area;
+                    draft.volume_unit = keep_vol;
+                }
+                *custom_paper_str = format!("{}", draft.paper_value);
+                *custom_real_str = format!("{}", draft.real_value);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    egui::ComboBox::from_id_salt(format!("{id_prefix}_imp_presets"))
+        .selected_text("Escalas Imperiales (EE.UU.)...")
+        .width(260.0)
+        .show_ui(ui, |ui| {
+            for p in IMPERIAL_PRESETS {
+                if ui.button(p.label).clicked() {
+                    *draft = PageScale::from_preset(p);
+                    *custom_paper_str = format!("{}", draft.paper_value);
+                    *custom_real_str = format!("{}", draft.real_value);
+                }
+            }
+        });
+
+    ui.separator();
+    ui.label(RichText::new("Escala personalizada").strong());
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(custom_paper_str).desired_width(60.0));
+        egui::ComboBox::from_id_salt(format!("{id_prefix}_paper_u"))
+            .selected_text(draft.paper_unit.suffix())
+            .width(75.0)
+            .show_ui(ui, |ui| {
+                for &u in LengthUnit::ALL {
+                    ui.selectable_value(&mut draft.paper_unit, u, u.suffix());
+                }
+            });
+        ui.label("=");
+        ui.add(egui::TextEdit::singleline(custom_real_str).desired_width(70.0));
+        egui::ComboBox::from_id_salt(format!("{id_prefix}_real_u"))
+            .selected_text(draft.real_unit.suffix())
+            .width(75.0)
+            .show_ui(ui, |ui| {
+                for &u in LengthUnit::ALL {
+                    ui.selectable_value(&mut draft.real_unit, u, u.suffix());
+                }
+            });
+    });
+}
+
+fn apply_custom_strings_to_draft(
+    draft: &mut PageScale,
+    custom_paper_str: &str,
+    custom_real_str: &str,
+    y_pair: Option<(&str, &str)>,
+) {
+    if let (Ok(pv), Ok(rv)) = (
+        custom_paper_str.trim().replace(',', ".").parse::<f64>(),
+        custom_real_str.trim().replace(',', ".").parse::<f64>(),
+    ) && pv > 0.0
+        && rv > 0.0
+    {
+        draft.paper_value = pv;
+        draft.real_value = rv;
+        draft.is_set = true;
+    }
+    if draft.separate_xy
+        && let Some((yp_str, yr_str)) = y_pair
+        && let (Ok(ypv), Ok(yrv)) = (
+            yp_str.trim().replace(',', ".").parse::<f64>(),
+            yr_str.trim().replace(',', ".").parse::<f64>(),
+        )
+        && ypv > 0.0
+        && yrv > 0.0
+    {
+        draft.y_paper_value = ypv;
+        draft.y_real_value = yrv;
+    }
 }

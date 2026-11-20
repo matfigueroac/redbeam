@@ -629,6 +629,45 @@ pub fn resolve_scale_at<'a>(
     page_scale
 }
 
+/// Parses 1-based page range strings like `"1, 3-5"` into deduplicated 0-based page indices.
+pub fn parse_page_range(input: &str, total_pages: usize) -> Vec<usize> {
+    if total_pages == 0 {
+        return Vec::new();
+    }
+    let trimmed = input.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("todas")
+        || trimmed.eq_ignore_ascii_case("all")
+    {
+        return (0..total_pages).collect();
+    }
+    let mut out = Vec::new();
+    for part in trimmed.split([',', ';']) {
+        let seg = part.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if let Some((a_s, b_s)) = seg.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a_s.trim().parse::<usize>(), b_s.trim().parse::<usize>()) {
+                let lo = a.min(b).max(1);
+                let hi = a.max(b).min(total_pages);
+                for p in lo..=hi {
+                    if !out.contains(&(p - 1)) {
+                        out.push(p - 1);
+                    }
+                }
+            }
+        } else if let Ok(p) = seg.parse::<usize>()
+            && p >= 1
+            && p <= total_pages
+            && !out.contains(&(p - 1))
+        {
+            out.push(p - 1);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,5 +705,12 @@ mod tests {
         let s_in = resolve_scale_at(&page_scale, std::slice::from_ref(&vp), Point2::new(150.0, 150.0));
         assert!((s_out.ratio_x() - 100.0).abs() < 1e-6);
         assert!((s_in.ratio_x() - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_page_ranges_cleanly() {
+        assert_eq!(parse_page_range("1, 3-5, 3", 6), vec![0, 2, 3, 4]);
+        assert_eq!(parse_page_range("todas", 3), vec![0, 1, 2]);
+        assert_eq!(parse_page_range("5-2", 4), vec![1, 2, 3]);
     }
 }

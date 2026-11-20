@@ -3,7 +3,7 @@ use crate::model::markup::{
     BoxShape, CommentReply, CountStyle, HatchPattern, LineEnd, LineStyle, MarkupKind,
     MarkupStatus, NoteIcon,
 };
-use crate::model::units::{LengthUnit, SlopeFormat};
+use crate::model::units::{LengthUnit, SlopeFormat, format_area};
 use crate::ui::actions::UiAction;
 use crate::ui::theme::RedBimTheme;
 use chrono::Utc;
@@ -196,7 +196,18 @@ pub fn draw_properties_panel(
                             .color(theme.accent_cyan),
                     );
                 }
+                if let Some(wa) = metrics.wall_area_m2 {
+                    ui.label(
+                        RichText::new(format!(
+                            "Área muro: {}",
+                            format_area(wa, p.scale.area_unit, p.scale.precision)
+                        ))
+                        .size(12.0)
+                        .color(theme.accent_green),
+                    );
+                }
                 let is_vol = matches!(m.kind, MarkupKind::MeasureVolume { .. });
+                let is_perim = matches!(m.kind, MarkupKind::MeasurePerimeter { .. });
                 let is_len = matches!(m.kind, MarkupKind::MeasureLength { .. });
                 if let Some(opts) = m.measurement_opts_mut() {
                     if ui
@@ -218,6 +229,22 @@ pub fn draw_properties_panel(
                                 .add(
                                     egui::DragValue::new(&mut opts.depth_meters)
                                         .range(0.01..=500.0)
+                                        .speed(0.05)
+                                        .suffix(" m"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+                    }
+                    if is_perim {
+                        ui.horizontal(|ui| {
+                            ui.label("Altura muro (m):");
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut opts.depth_meters)
+                                        .range(0.0..=100.0)
                                         .speed(0.05)
                                         .suffix(" m"),
                                 )
@@ -294,6 +321,34 @@ pub fn draw_properties_panel(
                                 }
                             }
                         });
+                }
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    let mut has_cost = m.unit_cost.is_some();
+                    if ui.checkbox(&mut has_cost, "Precio unit. ($):").changed() {
+                        m.unit_cost = if has_cost { Some(0.0) } else { None };
+                        changed = true;
+                    }
+                    if let Some(uc) = &mut m.unit_cost
+                        && ui
+                            .add(
+                                egui::DragValue::new(uc)
+                                    .range(0.0..=100_000_000.0)
+                                    .speed(100.0)
+                                    .prefix("$ "),
+                            )
+                            .changed()
+                    {
+                        changed = true;
+                    }
+                });
+                if let Some(total) = m.total_cost(&p.scale, &p.viewports) {
+                    ui.label(
+                        RichText::new(format!("Total cubicación: $ {:.0}", total))
+                            .strong()
+                            .size(12.0)
+                            .color(theme.accent_green),
+                    );
                 }
             }
 

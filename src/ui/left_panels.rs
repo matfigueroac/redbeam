@@ -18,6 +18,7 @@ pub enum LeftPanelTab {
     Bookmarks,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_left_panel(
     ui: &mut egui::Ui,
     active_tab: &mut LeftPanelTab,

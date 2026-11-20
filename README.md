@@ -25,21 +25,22 @@ Su arquitectura de anotaciones, mediciones y flujos de trabajo fue modelada medi
 - **Notas adhesivas** (`N`) con 15 estilos de ícono (`Comentario`, `Nota`, `Aprobado`, `Cruz`, `Consulta ?`, `Clave`, `Destacado`, etc.).
 - **Cuadros de texto** (`T`) con formas configurables (Rectángulo, Círculo/Óvalo, Triángulo, Hexágono) y **Máquina de escribir** (`W`).
 - **Llamadas con flecha (`Callout`, `Q`)**: punta de flecha, codo articulado, caja de texto con ajuste automático y edición directa en el plano con doble clic.
-- **Nube (`C`)** y **Nube+ (`K`, nube con llamada y comentario pareado)** con arcos semicirculares hacia el exterior.
-- **Flechas (`A`), Líneas (`L`), Polilíneas (`Shift+N`), Arcos de 3 puntos (`Shift+C`), Rectángulos (`R`), Elipses (`E`), Polígonos (`P`), Lápiz mano alzada, Resaltador (`H`), Sellos (`S`) e Imágenes**.
+- **Nube (`C`)** (arrastrar rectángulo o clic a clic poligonal con cierre por doble clic / `Enter`) y **Nube+ (`K`, nube con llamada y comentario pareado)** con arcos semicirculares hacia el exterior.
+- **Flechas (`A`), Líneas (`L`), Polilíneas (`Shift+N`), Arcos de 3 puntos (`Shift+C`), Rectángulos (`R`), Elipses (`E`), Polígonos (`P`), Lápiz mano alzada, Resaltador (`H`), Sellos (`S`), Imágenes (render real PNG/JPEG y PDF aplanado) e Instantánea (`G`, captura al portapapeles PNG)**.
+- **Alineación y distribución múltiple**: alinear a izquierda/centro/derecha/arriba/medio/abajo y distribuir horizontal/verticalmente desde el menú `Editar` o menú contextual.
 - **10 estilos de extremos de línea**: Ninguno, Flecha abierta/rellena, Flecha invertida, Diagonal (`/`), Tope, Círculo, Cuadrado, Diamante.
 - **Patrones de achurado**: Diagonal 45°, Diagonal 135°, Cuadrícula 45°, Horizontal y Vertical, con recorte automático de descuentos (*cutouts*).
 - **Hilo de respuestas, Estado** (`Pendiente`, `Aceptado`, `Rechazado`, `Completado`, `Anulado`) y **Capas** independientes.
 
 ### 2. Escala, Calibración y Mediciones
-- **Calibración de escala en 2 puntos** con **lupa de precisión en vivo** y Snap vectorial al PDF.
-- **Escala X / Y independiente**, aplicación por página o a todo el documento.
-- **Viewports de escala**: regiones rectangulares con escala propia dentro de una misma lámina (por ejemplo, planta `1:50` con detalle `1:20` en la misma hoja).
-- **Herramientas de medición**:
+- **Calibración de escala en 2 puntos** con **lupa de precisión en vivo**, **banner rápido de calibración** sobre planos sin escala (`1:50`, `1:100`, `1:200`) y aplicación por página, rango (`"1, 3-5"`) o documento completo.
+- **Escala X / Y independiente** y **Viewports de escala editables** dentro de una misma lámina (por ejemplo, planta `1:50` con detalle `1:20` en la misma hoja).
+- **Herramientas de medición y presupuesto**:
   - **Longitud (`Shift+L`)** con líneas de extensión, desfase ajustable y pendiente/desnivel opcional
-  - **Polilongitud** y **Perímetro (`Shift+P`)** con cotas por segmento opcionales
+  - **Polilongitud** y **Perímetro (`Shift+P`)** con **altura de muro y Área de muro (`m²`)** y cotas por segmento opcionales
   - **Área (`Shift+A`)** y **Volumen (`Shift+V`)** con soporte de **Recortes / Descuentos (`Cutout`)** y profundidad en metros
   - **Ángulo (`Shift+G`)**, **Radio (`Shift+U`)**, **Diámetro** y **Conteo (`Shift+O`)** numerado
+  - **Precio unitario (`$`) y subtotal de cubicación** en Propiedades, Lista de marcas y CSV
   - **Dibujo a escala exacto** (rectángulo por ancho y alto en `m`/`cm`/`mm`/`ft-in`)
   - **Leyenda de mediciones** viva sobre la lámina
 
@@ -47,7 +48,8 @@ Su arquitectura de anotaciones, mediciones y flujos de trabajo fue modelada medi
 - **Motor PDF 100% puro Rust** (`hayro` + `lopdf`, sin dependencias externas ni DLLs):
   - Renderizado por **tiles de alta resolución** al hacer zoom profundo.
   - **Snap al Contenido PDF** (`hayro_interpret::Device` extrayendo vértices, puntos finales y puntos medios de la geometría vectorial del plano), **Snap a Marcas**, **Snap a Grilla** y bloqueo ortogonal 45°/90° con `Shift`.
-  - Guardado con **`/Annots` + `/VP` + `/Measure` estándar ISO 32000-1** más estado lossless **`/RedBIMState`**.
+  - **Comparación de documentos PDF** (superposición visual rojo/azul de cambios + nubes automáticas de diferencias), **Combinar PDFs** y **Extraer página actual**.
+  - Guardado con **`/Annots` + `/AP` (Appearance Streams) + `/VP` + `/Measure` estándar ISO 32000-1** más estado lossless **`/RedBIMState`**.
   - Exportación a **PDF Aplanado** (marcas y mediciones dibujadas vectorialmente en el flujo de página) y **CSV / JSON**.
 - **Caja de herramientas (`Tool Chest`)**: `Mis herramientas` (atajos `1`–`8`), `Recientes`, `Arquitecto revisor`, `Contratista revisor`, `Ingeniero revisor`, `Mediciones generales (Chile)` y `Símbolos y sellos`, con soporte de **Modo Dibujo / Modo Propiedades** y persistencia local.
 - **Lista de marcas** inferior ordenable y filtrable con edición de estado inline, salto directo al hacer clic y fila de totales.
@@ -88,7 +90,7 @@ También incluye un plano de ejemplo generado en [`samples/plano_demo_chile.pdf`
 | `N` / `T` / `W` | Nota / Cuadro de texto / Máquina de escribir |
 | `Q` / `C` / `K` | Llamada (`Callout`) / Nube / Nube+ |
 | `A` / `L` / `R` / `E` / `P` | Flecha / Línea / Rectángulo / Elipse / Polígono |
-| `H` / `S` | Resaltador / Sello |
+| `H` / `S` / `G` | Resaltador / Sello / Instantánea PNG al portapapeles |
 | `Shift+L` / `Shift+P` / `Shift+A` / `Shift+V` | Longitud / Perímetro / Área / Volumen |
 | `Shift+G` / `Shift+U` / `Shift+O` | Ángulo / Radio / Conteo |
 | `1` – `8` | Activar herramienta de *Mis herramientas* |

@@ -31,7 +31,9 @@ fn decode_pdf_string(obj: &Object) -> String {
     };
     if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() >= 4 {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&u16s);
@@ -101,7 +103,7 @@ pub fn open_pdf_from_bytes(
 
     // Extract text per page for instant Search panel
     let mut search_text_by_page = vec![String::new(); pages.len()];
-    for (&num, _) in &page_map {
+    for &num in page_map.keys() {
         let idx = num.saturating_sub(1) as usize;
         if idx < search_text_by_page.len()
             && let Ok(txt) = doc.extract_text(&[num])
@@ -454,7 +456,7 @@ fn import_pdf_annotation(
         b"PolyLine" | b"Polygon" => {
             let verts = dict.get(b"Vertices").ok().and_then(|o| o.as_array().ok())?;
             let mut pts = Vec::new();
-            for pair in verts.chunks_exact(2) {
+            for pair in verts.as_chunks::<2>().0 {
                 if let (Some(x), Some(y)) = (read_number(&pair[0]), read_number(&pair[1])) {
                     pts.push(Point2::new(x, page_h - y));
                 }
@@ -489,7 +491,7 @@ fn import_pdf_annotation(
             for s_obj in ink_list {
                 if let Ok(coords) = s_obj.as_array() {
                     let mut pts = Vec::new();
-                    for pair in coords.chunks_exact(2) {
+                    for pair in coords.as_chunks::<2>().0 {
                         if let (Some(x), Some(y)) = (read_number(&pair[0]), read_number(&pair[1]))
                         {
                             pts.push(Point2::new(x, page_h - y));
@@ -557,6 +559,7 @@ pub fn save_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
     let mut doc =
         Document::load_mem(&tab.raw_pdf_bytes).map_err(|e| format!("Error al procesar PDF: {e}"))?;
     let pages = doc.get_pages();
+    let ap_res = crate::pdf::flatten::PdfOverlayResources::create(&mut doc);
 
     for (&page_num, &page_id) in &pages {
         let idx = page_num.saturating_sub(1) as usize;
@@ -565,10 +568,14 @@ pub fn save_pdf_to_bytes(tab: &DocumentTab) -> Result<Vec<u8>, String> {
         };
         let page_h = page_model.height_pt;
 
-        // Write ISO 32000-1 /Annots for all markups on this page
+        // Write ISO 32000-1 /Annots + Form XObject /AP appearance streams for all markups on this page
         let mut annot_refs = Vec::new();
         for m in tab.markups.iter().filter(|m| m.page_index == idx) {
-            let annot_dict = markup_to_pdf_annot(m, page_model, page_h);
+            let mut annot_dict = markup_to_pdf_annot(m, page_model, page_h);
+            let ap_id = crate::pdf::flatten::build_markup_appearance_stream(
+                &mut doc, &ap_res, m, page_model, page_h,
+            );
+            annot_dict.set("AP", dictionary! { "N" => ap_id });
             let aid = doc.add_object(annot_dict);
             annot_refs.push(Object::Reference(aid));
         }
@@ -1011,6 +1018,189 @@ pub fn delete_page_in_doc(tab: &mut DocumentTab, page_index: usize) -> Result<()
     tab.secondary_camera.page_index = tab.secondary_camera.page_index.min(max_idx);
     tab.dirty = true;
     Ok(())
+}
+
+/// Materializes inherited page tree attributes (`MediaBox`, `CropBox`, `Rotate`, `Resources`)
+/// onto a standalone page dictionary before renumbering/merging.
+fn materialize_page_dict(doc: &Document, page_id: ObjectId) -> Option<Dictionary> {
+    let mut page_dict = doc.get_dictionary(page_id).ok()?.clone();
+    let mut cur_parent = page_dict
+        .get(b"Parent")
+        .ok()
+        .and_then(|o| o.as_reference().ok());
+    let mut guard = 0;
+    while let Some(pid) = cur_parent {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let Ok(pdict) = doc.get_dictionary(pid) else {
+            break;
+        };
+        for key in [&b"MediaBox"[..], &b"CropBox"[..], &b"Rotate"[..], &b"Resources"[..]] {
+            if !page_dict.has(key)
+                && let Ok(val) = pdict.get(key)
+            {
+                page_dict.set(key, val.clone());
+            }
+        }
+        cur_parent = pdict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+    }
+    Some(page_dict)
+}
+
+/// Combines multiple PDF documents (supplied as raw byte slices) into one unified PDF.
+pub fn combine_pdf_bytes(docs_bytes: &[&[u8]]) -> Result<Vec<u8>, String> {
+    if docs_bytes.is_empty() {
+        return Err("No hay documentos para combinar.".to_string());
+    }
+    let mut merged = Document::with_version("1.7");
+    let pages_id = merged.new_object_id();
+    let mut max_id = pages_id.0 + 1;
+    let mut all_page_ids = Vec::new();
+
+    for (i, raw) in docs_bytes.iter().enumerate() {
+        let mut src = Document::load_mem(raw)
+            .map_err(|e| format!("Error leyendo documento #{}: {e}", i + 1))?;
+        let page_ids: Vec<ObjectId> = src.get_pages().values().copied().collect();
+        for &pid in &page_ids {
+            if let Some(mat) = materialize_page_dict(&src, pid) {
+                src.objects.insert(pid, Object::Dictionary(mat));
+            }
+        }
+        src.renumber_objects_with(max_id);
+        max_id = src.max_id + 1;
+
+        let renumbered_pages: Vec<ObjectId> = src.get_pages().values().copied().collect();
+        for (oid, obj) in src.objects {
+            merged.objects.insert(oid, obj);
+        }
+        for pid in renumbered_pages {
+            if let Ok(d) = merged.get_dictionary_mut(pid) {
+                d.set("Parent", pages_id);
+            }
+            all_page_ids.push(Object::Reference(pid));
+        }
+    }
+
+    let count = all_page_ids.len() as i64;
+    merged.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Count" => count,
+            "Kids" => all_page_ids,
+        }),
+    );
+    merged.max_id = max_id;
+    let catalog_id = merged.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    merged.trailer.set("Root", catalog_id);
+
+    let mut out = Vec::new();
+    merged
+        .save_to(&mut out)
+        .map_err(|e| format!("Error guardando PDF combinado: {e}"))?;
+    Ok(out)
+}
+
+pub fn combine_pdf_files(paths: &[std::path::PathBuf]) -> Result<Vec<u8>, String> {
+    let mut bufs = Vec::with_capacity(paths.len());
+    for p in paths {
+        let b = std::fs::read(p).map_err(|e| format!("Error leyendo {}: {e}", p.display()))?;
+        bufs.push(b);
+    }
+    let refs: Vec<&[u8]> = bufs.iter().map(|v| v.as_slice()).collect();
+    combine_pdf_bytes(&refs)
+}
+
+/// Extracts the specified 0-based `page_indices` from `tab` into a standalone PDF (retaining markups & scales).
+pub fn extract_pages_to_pdf(tab: &DocumentTab, page_indices: &[usize]) -> Result<Vec<u8>, String> {
+    if page_indices.is_empty() {
+        return Err("No se seleccionaron páginas para extraer.".to_string());
+    }
+    let mut doc = Document::load_mem(&tab.raw_pdf_bytes).map_err(|e| e.to_string())?;
+    let catalog_id = doc
+        .trailer
+        .get(b"Root")
+        .and_then(|o| o.as_reference())
+        .map_err(|e| e.to_string())?;
+    let pages_id = doc
+        .get_dictionary(catalog_id)
+        .and_then(|d| d.get(b"Pages"))
+        .and_then(|o| o.as_reference())
+        .map_err(|e| e.to_string())?;
+
+    let existing: Vec<ObjectId> = doc.get_pages().values().copied().collect();
+    let mut kept_ids = Vec::new();
+    let mut index_remap: HashMap<usize, usize> = HashMap::new();
+    for &idx in page_indices {
+        if let Some(&pid) = existing.get(idx)
+            && !index_remap.contains_key(&idx)
+        {
+            if let Some(mat) = materialize_page_dict(&doc, pid) {
+                doc.objects.insert(pid, Object::Dictionary(mat));
+            }
+            index_remap.insert(idx, kept_ids.len());
+            kept_ids.push(pid);
+        }
+    }
+    if kept_ids.is_empty() {
+        return Err("Las páginas indicadas no existen.".to_string());
+    }
+
+    let kids: Vec<Object> = kept_ids.iter().map(|&id| Object::Reference(id)).collect();
+    for &pid in &kept_ids {
+        if let Ok(d) = doc.get_dictionary_mut(pid) {
+            d.set("Parent", pages_id);
+        }
+    }
+    if let Ok(pages_dict) = doc.get_dictionary_mut(pages_id) {
+        pages_dict.set("Kids", kids);
+        pages_dict.set("Count", kept_ids.len() as i64);
+    }
+
+    let mut extracted_pages = Vec::new();
+    for &old_idx in page_indices {
+        if let Some(pm) = tab.pages.get(old_idx)
+            && let Some(&new_idx) = index_remap.get(&old_idx)
+            && new_idx == extracted_pages.len()
+        {
+            let mut npm = pm.clone();
+            npm.page_index = new_idx;
+            extracted_pages.push(npm);
+        }
+    }
+    let mut extracted_markups = Vec::new();
+    for m in &tab.markups {
+        if let Some(&new_idx) = index_remap.get(&m.page_index) {
+            let mut nm = m.clone();
+            nm.page_index = new_idx;
+            extracted_markups.push(nm);
+        }
+    }
+    let state = RedBimEmbeddedState {
+        version: 1,
+        pages: extracted_pages,
+        markups: extracted_markups,
+        layers: tab.layers.clone(),
+        bookmarks: Vec::new(),
+    };
+    if let Ok(json) = serde_json::to_vec(&state) {
+        let mut s = Stream::new(dictionary! {}, json);
+        let _ = s.compress();
+        let sid = doc.add_object(s);
+        if let Ok(cat) = doc.get_dictionary_mut(catalog_id) {
+            cat.set("RedBIMState", sid);
+            cat.remove(b"Outlines");
+        }
+    }
+
+    let mut out = Vec::new();
+    doc.save_to(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 /// Utility helper returning unit suffix for LengthUnit when building Scale presets.

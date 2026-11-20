@@ -576,3 +576,64 @@ pub fn paint_icon(painter: &Painter, r: Rect, kind: IconKind, fg: Color32, accen
         }
     }
 }
+
+pub fn generate_app_icon() -> egui::IconData {
+    let size = 64usize;
+    let mut rgba = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let fx = x as f32;
+            let fy = y as f32;
+            let cx = (fx - 31.5).abs();
+            let cy = (fy - 31.5).abs();
+            // Rounded square SDF with radius 13
+            let half = 30.0 - 13.0;
+            let dx = (cx - half).max(0.0);
+            let dy = (cy - half).max(0.0);
+            let dist = (dx * dx + dy * dy).sqrt() + cx.max(cy).min(half) - 30.0;
+            let mut idx = (y * size + x) * 4;
+            if dist > 0.5 {
+                rgba[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            // Background gradient crimson (#DC2626 -> #881313)
+            let t = fy / 63.0;
+            let mut r = (224.0 - 72.0 * t) as u8;
+            let mut g = (38.0 - 18.0 * t) as u8;
+            let mut b = (38.0 - 16.0 * t) as u8;
+            // Inner border highlight
+            if dist > -2.5 {
+                r = 248;
+                g = 113;
+                b = 113;
+            }
+            // Blueprint caliper / architectural reticle in crisp white
+            let outer_sq = cx.max(cy) >= 14.0 && cx.max(cy) <= 18.5 && (cx <= 18.5 && cy <= 18.5);
+            let tick_h = cy <= 1.6 && (8.0..=23.0).contains(&cx);
+            let tick_v = cx <= 1.6 && (8.0..=23.0).contains(&cy);
+            let center_dot = (cx * cx + cy * cy).sqrt() <= 4.0;
+            if outer_sq || tick_h || tick_v {
+                r = 255;
+                g = 255;
+                b = 255;
+            } else if center_dot {
+                r = 56;
+                g = 189;
+                b = 248;
+            }
+            let alpha = ((0.5 - dist).clamp(0.0, 1.0) * 255.0) as u8;
+            rgba[idx] = r;
+            idx += 1;
+            rgba[idx] = g;
+            idx += 1;
+            rgba[idx] = b;
+            idx += 1;
+            rgba[idx] = alpha;
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: size as u32,
+        height: size as u32,
+    }
+}

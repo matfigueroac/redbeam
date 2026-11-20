@@ -1,4 +1,5 @@
-use crate::geometry::math::Point2;
+use crate::geometry::math::{Point2, Rect2};
+use crate::model::document::AlignKind;
 use crate::model::markup::MarkupStatus;
 use crate::model::scale::PageScale;
 use crate::model::settings::{CsvDelimiter, ThemeMode};
@@ -16,6 +17,9 @@ pub enum DialogRequest {
         apply_all_pages: bool,
     },
     SetScale,
+    EditViewport {
+        viewport_id: Uuid,
+    },
     SketchToScale,
     CreateStamp,
     Preferences,
@@ -35,6 +39,9 @@ pub enum UiAction {
     ExportCsv(CsvDelimiter),
     ExportMarkupsJson,
     ImportMarkupsJson,
+    CombinePdfs,
+    CompareWithPdf,
+    ExtractCurrentPage,
     CloseTab(usize),
     SelectTab(usize),
 
@@ -47,6 +54,7 @@ pub enum UiAction {
     SelectAllOnPage,
     GroupSelected,
     UngroupSelected,
+    AlignSelected(AlignKind),
     BringToFront,
     SendToBack,
 
@@ -76,6 +84,16 @@ pub enum UiAction {
         scale: PageScale,
         apply_all: bool,
     },
+    ApplyScaleToRange {
+        scale: PageScale,
+        pages: Vec<usize>,
+    },
+    SaveViewportEdit {
+        id: Uuid,
+        name: String,
+        scale: PageScale,
+    },
+    CaptureSnapshot(Rect2),
     StartTwoPointCalibration,
     OpenDialog(DialogRequest),
     SetTheme(ThemeMode),

@@ -3,6 +3,7 @@
 use eframe::egui;
 use redbim::app::{LaunchConfig, RedBimApp};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn parse_args() -> LaunchConfig {
     let mut cfg = LaunchConfig {
@@ -50,6 +51,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RedBIM — Visor y Cubicación de Planos PDF (Chile / Métrico)")
+            .with_icon(Arc::new(redbim::ui::icons::generate_app_icon()))
             .with_inner_size([1440.0, 880.0])
             .with_min_inner_size([960.0, 620.0]),
         ..Default::default()

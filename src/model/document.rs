@@ -427,9 +427,93 @@ impl DocumentTab {
             if let Some(c) = metrics.count {
                 totals.total_count += c;
             }
+            if let Some(cost) = m.total_cost(&page.scale, &page.viewports) {
+                totals.total_cost += cost;
+            }
             totals.total_markups += 1;
         }
         totals
+    }
+
+    pub fn align_selected(&mut self, kind: AlignKind) -> bool {
+        use crate::geometry::hit_test::{markup_bounds, translate_markup};
+        if self.selected_ids.len() < 2 {
+            return false;
+        }
+        let set: HashSet<Uuid> = self.selected_ids.iter().copied().collect();
+        let mut items: Vec<(usize, Rect2)> = self
+            .markups
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| set.contains(&m.id) && !m.locked)
+            .map(|(idx, m)| (idx, markup_bounds(m)))
+            .collect();
+        if items.len() < 2 {
+            return false;
+        }
+        self.push_undo();
+
+        let min_x = items.iter().map(|(_, r)| r.min_x).fold(f64::INFINITY, f64::min);
+        let max_x = items.iter().map(|(_, r)| r.max_x).fold(f64::NEG_INFINITY, f64::max);
+        let min_y = items.iter().map(|(_, r)| r.min_y).fold(f64::INFINITY, f64::min);
+        let max_y = items.iter().map(|(_, r)| r.max_y).fold(f64::NEG_INFINITY, f64::max);
+        let cx_all = (min_x + max_x) * 0.5;
+        let cy_all = (min_y + max_y) * 0.5;
+
+        match kind {
+            AlignKind::Left => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(min_x - r.min_x, 0.0));
+                }
+            }
+            AlignKind::CenterX => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(cx_all - r.center().x, 0.0));
+                }
+            }
+            AlignKind::Right => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(max_x - r.max_x, 0.0));
+                }
+            }
+            AlignKind::Top => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(0.0, min_y - r.min_y));
+                }
+            }
+            AlignKind::CenterY => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(0.0, cy_all - r.center().y));
+                }
+            }
+            AlignKind::Bottom => {
+                for (idx, r) in items {
+                    translate_markup(&mut self.markups[idx], Point2::new(0.0, max_y - r.max_y));
+                }
+            }
+            AlignKind::DistributeH if items.len() >= 3 => {
+                items.sort_by(|a, b| a.1.center().x.partial_cmp(&b.1.center().x).unwrap_or(std::cmp::Ordering::Equal));
+                let first = items.first().unwrap().1.center().x;
+                let last = items.last().unwrap().1.center().x;
+                let step = (last - first) / (items.len() - 1) as f64;
+                for (k, (idx, r)) in items.iter().enumerate() {
+                    let target = first + step * k as f64;
+                    translate_markup(&mut self.markups[*idx], Point2::new(target - r.center().x, 0.0));
+                }
+            }
+            AlignKind::DistributeV if items.len() >= 3 => {
+                items.sort_by(|a, b| a.1.center().y.partial_cmp(&b.1.center().y).unwrap_or(std::cmp::Ordering::Equal));
+                let first = items.first().unwrap().1.center().y;
+                let last = items.last().unwrap().1.center().y;
+                let step = (last - first) / (items.len() - 1) as f64;
+                for (k, (idx, r)) in items.iter().enumerate() {
+                    let target = first + step * k as f64;
+                    translate_markup(&mut self.markups[*idx], Point2::new(0.0, target - r.center().y));
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     pub fn jump_to_rect(&mut self, page_index: usize, rect: Rect2, viewport_size: (f64, f64)) {
@@ -446,6 +530,18 @@ impl DocumentTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignKind {
+    Left,
+    CenterX,
+    Right,
+    Top,
+    CenterY,
+    Bottom,
+    DistributeH,
+    DistributeV,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DocumentTotals {
     pub total_markups: usize,
@@ -454,4 +550,5 @@ pub struct DocumentTotals {
     pub total_area_m2: f64,
     pub total_volume_m3: f64,
     pub total_count: usize,
+    pub total_cost: f64,
 }

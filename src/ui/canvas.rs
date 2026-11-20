@@ -8,7 +8,7 @@ use crate::geometry::math::{
     sample_three_point_arc,
 };
 use crate::geometry::snap::{SnapIndex, SnapKind, SnapResult, apply_ortho_constraint, find_best_snap};
-use crate::model::document::{DocumentTab, SplitViewMode};
+use crate::model::document::{AlignKind, DocumentTab, SplitViewMode};
 use crate::model::markup::{
     BoxShape, CountStyle, HatchPattern, LineEnd, LineStyle, Markup, MarkupKind, MarkupStatus,
     MarkupStyle, MeasurementOptions, NoteIcon,
@@ -109,6 +109,14 @@ pub struct TileRequest {
     pub out_h: u16,
 }
 
+pub struct CanvasResources<'a> {
+    pub base_textures: &'a HashMap<(Uuid, usize), TextureHandle>,
+    pub tile_textures: &'a HashMap<(Uuid, usize), CachedTile>,
+    pub image_textures: &'a HashMap<Uuid, TextureHandle>,
+    pub snap_indices: &'a HashMap<(Uuid, usize), SnapIndex>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn draw_document_workspace(
     ui: &mut egui::Ui,
     tab: &mut DocumentTab,
@@ -117,9 +125,7 @@ pub fn draw_document_workspace(
     default_style: &MarkupStyle,
     default_meas_opts: &MeasurementOptions,
     settings: &AppSettings,
-    base_textures: &HashMap<(Uuid, usize), TextureHandle>,
-    tile_textures: &HashMap<(Uuid, usize), CachedTile>,
-    snap_indices: &HashMap<(Uuid, usize), SnapIndex>,
+    res: CanvasResources<'_>,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
     tile_requests: &mut Vec<TileRequest>,
@@ -139,9 +145,7 @@ pub fn draw_document_workspace(
                 default_style,
                 default_meas_opts,
                 settings,
-                base_textures,
-                tile_textures,
-                snap_indices,
+                &res,
                 theme,
                 actions,
                 tile_requests,
@@ -153,7 +157,7 @@ pub fn draw_document_workspace(
             let right_r = Rect::from_min_max(Pos2::new(full_rect.min.x + half + 2.0, full_rect.min.y), full_rect.max);
             draw_canvas_pane(
                 ui, left_r, false, tab, canvas, active_tool, default_style, default_meas_opts,
-                settings, base_textures, tile_textures, snap_indices, theme, actions, tile_requests,
+                settings, &res, theme, actions, tile_requests,
             );
             ui.painter().line_segment(
                 [Pos2::new(full_rect.min.x + half, full_rect.min.y), Pos2::new(full_rect.min.x + half, full_rect.max.y)],
@@ -161,7 +165,7 @@ pub fn draw_document_workspace(
             );
             draw_canvas_pane(
                 ui, right_r, true, tab, canvas, active_tool, default_style, default_meas_opts,
-                settings, base_textures, tile_textures, snap_indices, theme, actions, tile_requests,
+                settings, &res, theme, actions, tile_requests,
             );
         }
         SplitViewMode::Horizontal => {
@@ -170,7 +174,7 @@ pub fn draw_document_workspace(
             let bot_r = Rect::from_min_max(Pos2::new(full_rect.min.x, full_rect.min.y + half + 2.0), full_rect.max);
             draw_canvas_pane(
                 ui, top_r, false, tab, canvas, active_tool, default_style, default_meas_opts,
-                settings, base_textures, tile_textures, snap_indices, theme, actions, tile_requests,
+                settings, &res, theme, actions, tile_requests,
             );
             ui.painter().line_segment(
                 [Pos2::new(full_rect.min.x, full_rect.min.y + half), Pos2::new(full_rect.max.x, full_rect.min.y + half)],
@@ -178,7 +182,7 @@ pub fn draw_document_workspace(
             );
             draw_canvas_pane(
                 ui, bot_r, true, tab, canvas, active_tool, default_style, default_meas_opts,
-                settings, base_textures, tile_textures, snap_indices, theme, actions, tile_requests,
+                settings, &res, theme, actions, tile_requests,
             );
         }
     }
@@ -195,9 +199,7 @@ fn draw_canvas_pane(
     default_style: &MarkupStyle,
     default_meas_opts: &MeasurementOptions,
     settings: &AppSettings,
-    base_textures: &HashMap<(Uuid, usize), TextureHandle>,
-    tile_textures: &HashMap<(Uuid, usize), CachedTile>,
-    snap_indices: &HashMap<(Uuid, usize), SnapIndex>,
+    res: &CanvasResources<'_>,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
     tile_requests: &mut Vec<TileRequest>,
@@ -291,7 +293,7 @@ fn draw_canvas_pane(
     painter.rect_filled(page_screen_rect, CornerRadius::ZERO, Color32::WHITE);
 
     // Base page raster texture
-    let base_tex = base_textures.get(&(tab.id, page_idx));
+    let base_tex = res.base_textures.get(&(tab.id, page_idx));
     if let Some(tex) = base_tex {
         painter.image(
             tex.id(),
@@ -313,7 +315,7 @@ fn draw_canvas_pane(
         );
 
         let mut need_tile = true;
-        if let Some(tile) = tile_textures.get(&(tab.id, page_idx)) {
+        if let Some(tile) = res.tile_textures.get(&(tab.id, page_idx)) {
             let covers = tile.crop_rect_pt.min_x <= crop_rect.min_x + 1.0
                 && tile.crop_rect_pt.min_y <= crop_rect.min_y + 1.0
                 && tile.crop_rect_pt.max_x >= crop_rect.max_x - 1.0
@@ -432,6 +434,7 @@ fn draw_canvas_pane(
             is_sel,
             &legend_rows,
             &doc_totals,
+            res.image_textures,
             theme,
         );
     }
@@ -449,6 +452,9 @@ fn draw_canvas_pane(
     // Only process editing interactions in active pane (or if hovered)
     let is_active_pane = tab.split_mode == SplitViewMode::None || tab.active_pane_secondary == is_secondary;
     if is_active_pane {
+        if active_tool.is_measurement() && !page.scale.is_set {
+            draw_uncalibrated_scale_banner(pane_ui.ctx(), pane_rect, theme, actions);
+        }
         handle_canvas_input(
             &mut pane_ui,
             pane_rect,
@@ -460,7 +466,7 @@ fn draw_canvas_pane(
             default_style,
             default_meas_opts,
             settings,
-            snap_indices.get(&(tab.id, page_idx)),
+            res.snap_indices.get(&(tab.id, page_idx)),
             base_tex,
             grid_step_pt,
             xf,
@@ -472,8 +478,9 @@ fn draw_canvas_pane(
     // Inline text editor floating directly over markup when double-clicked or newly placed
     let mut inline_commit: Option<(Uuid, String)> = None;
     let mut inline_cancel = false;
-    if let Some((edit_id, ref mut buf, ref mut needs_focus)) = canvas.inline_edit {
-        if let Some(m) = tab.markups.iter().find(|x| x.id == edit_id && x.page_index == page_idx) {
+    if let Some((edit_id, ref mut buf, ref mut needs_focus)) = canvas.inline_edit
+        && let Some(m) = tab.markups.iter().find(|x| x.id == edit_id && x.page_index == page_idx)
+    {
             let b = markup_bounds(m);
             let (sx, sy) = xf.page_to_screen(b.min());
             let (ex, ey) = xf.page_to_screen(b.max());
@@ -527,7 +534,6 @@ fn draw_canvas_pane(
             } else if cancel {
                 inline_cancel = true;
             }
-        }
     }
     if let Some((edit_id, text_to_save)) = inline_commit {
         canvas.inline_edit = None;
@@ -714,20 +720,20 @@ fn handle_canvas_input(
 
     // If Select tool active: handle selection, handles, dragging, double-click inline edit & context menu
     if *active_tool == ActiveTool::Select {
-        if double_clicked && in_pane {
-            if let Some(m) = tab
+        if double_clicked
+            && in_pane
+            && let Some(m) = tab
                 .markups
                 .iter()
                 .rev()
                 .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, raw_pt, tol_pt))
-            {
-                let txt = m
-                    .text_content()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| m.comment.clone());
-                canvas.inline_edit = Some((m.id, txt, true));
-                return;
-            }
+        {
+            let txt = m
+                .text_content()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| m.comment.clone());
+            canvas.inline_edit = Some((m.id, txt, true));
+            return;
         }
 
         if primary_pressed && in_pane {
@@ -852,18 +858,17 @@ fn handle_canvas_input(
         }
 
         // Right-click context menu
-        if secondary_clicked && in_pane {
-            if let Some(hit_id) = tab
+        if secondary_clicked
+            && in_pane
+            && let Some(hit_id) = tab
                 .markups
                 .iter()
                 .rev()
                 .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, raw_pt, tol_pt))
                 .map(|m| m.id)
-            {
-                if !tab.selected_ids.contains(&hit_id) {
-                    tab.select_only(hit_id);
-                }
-            }
+            && !tab.selected_ids.contains(&hit_id)
+        {
+            tab.select_only(hit_id);
         }
         let sel_snapshot = tab.selected_ids.clone();
         let can_cutout = sel_snapshot.len() == 1
@@ -881,6 +886,25 @@ fn handle_canvas_input(
                 if can_cutout && ui.button("Agregar Recorte (descontar área)").clicked() {
                     actions.push(UiAction::CreateCutoutForMarkup(sel_snapshot[0]));
                     ui.close();
+                }
+                if sel_snapshot.len() >= 2 {
+                    ui.menu_button("Alinear / Distribuir", |ui| {
+                        for (kind, label) in [
+                            (AlignKind::Left, "Alinear a la izquierda"),
+                            (AlignKind::CenterX, "Centrar horizontalmente"),
+                            (AlignKind::Right, "Alinear a la derecha"),
+                            (AlignKind::Top, "Alinear arriba"),
+                            (AlignKind::CenterY, "Centrar verticalmente"),
+                            (AlignKind::Bottom, "Alinear abajo"),
+                            (AlignKind::DistributeH, "Distribuir horizontalmente"),
+                            (AlignKind::DistributeV, "Distribuir verticalmente"),
+                        ] {
+                            if ui.button(label).clicked() {
+                                actions.push(UiAction::AlignSelected(kind));
+                                ui.close();
+                            }
+                        }
+                    });
                 }
                 if ui.button("+ Agregar a Caja de herramientas").clicked() {
                     actions.push(UiAction::AddSelectedToToolChest);
@@ -1036,7 +1060,7 @@ fn handle_canvas_input(
                         && let Ok(bytes) = std::fs::read(&img_path)
                     {
                         tab.push_undo();
-                        let b64 = base64_encode(&bytes);
+                        let b64 = crate::pdf::base64_encode(&bytes);
                         let m = Markup::new(
                             cam_page_idx,
                             "Imagen",
@@ -1062,11 +1086,12 @@ fn handle_canvas_input(
                     return;
                 }
                 ActiveTool::Snapshot => {
-                    actions.push(UiAction::ShowToast(
-                        "Instantánea copiada (seleccione región con Rectángulo o Ctrl+C)".to_string(),
-                    ));
-                    *active_tool = ActiveTool::Select;
-                    return;
+                    canvas.creation = Some(CreationState::TwoPoint {
+                        tool: ActiveTool::Snapshot,
+                        start: pt,
+                        current: pt,
+                        from_drag: false,
+                    });
                 }
                 ActiveTool::MeasureCount => {
                     tab.push_undo();
@@ -1283,20 +1308,17 @@ fn handle_canvas_input(
                     return;
                 }
                 Some(CreationState::Poly { points, .. }) => {
-                    if !finish_requested {
-                        if points.last().is_none_or(|last| last.dist(pt) > 0.5) {
-                            points.push(pt);
-                        }
+                    if !finish_requested && points.last().is_none_or(|last| last.dist(pt) > 0.5) {
+                        points.push(pt);
                     }
                 }
                 Some(CreationState::Count { markup_id }) => {
                     let mid = *markup_id;
-                    if !finish_requested {
-                        if let Some(m) = tab.markups.iter_mut().find(|x| x.id == mid)
-                            && let MarkupKind::MeasureCount { points, .. } = &mut m.kind
-                        {
-                            points.push(pt);
-                        }
+                    if !finish_requested
+                        && let Some(m) = tab.markups.iter_mut().find(|x| x.id == mid)
+                        && let MarkupKind::MeasureCount { points, .. } = &mut m.kind
+                    {
+                        points.push(pt);
                     }
                 }
                 _ => {}
@@ -1354,6 +1376,15 @@ fn handle_canvas_input(
                             actions,
                         );
                     }
+                    return;
+                } else if primary_released && !*from_drag && *tool == ActiveTool::Cloud {
+                    let s = *start;
+                    canvas.creation = Some(CreationState::Poly {
+                        tool: ActiveTool::Cloud,
+                        points: vec![s],
+                        current: pt,
+                        target_cutout_id: None,
+                    });
                     return;
                 }
             }
@@ -1559,6 +1590,14 @@ fn finalize_two_point(
             *active_tool = ActiveTool::Select;
             return;
         }
+        ActiveTool::Snapshot => {
+            let r = Rect2::from_min_max(start, end);
+            if r.width() > 4.0 && r.height() > 4.0 {
+                actions.push(UiAction::CaptureSnapshot(r));
+            }
+            *active_tool = ActiveTool::Select;
+            return;
+        }
         _ => {}
     }
 
@@ -1733,6 +1772,13 @@ fn finalize_poly(
     let kind = match tool {
         ActiveTool::Polyline => MarkupKind::Polyline { points: pts },
         ActiveTool::Polygon if pts.len() >= 3 => MarkupKind::Polygon { points: pts },
+        ActiveTool::Cloud if pts.len() >= 3 => {
+            style.line_style = LineStyle::Cloud;
+            MarkupKind::Cloud {
+                points: pts,
+                is_rect: false,
+            }
+        }
         ActiveTool::MeasurePolylength => MarkupKind::MeasurePolylength {
             points: pts,
             opts: default_meas_opts.clone(),
@@ -1793,6 +1839,7 @@ fn draw_markup_on_canvas(
     selected: bool,
     legend_rows: &[(String, usize, String)],
     _totals: &crate::model::document::DocumentTotals,
+    image_textures: &HashMap<Uuid, TextureHandle>,
     theme: &RedBimTheme,
 ) {
     let sc = m.style.stroke_color;
@@ -2014,9 +2061,19 @@ fn draw_markup_on_canvas(
         }
         MarkupKind::Image { rect, caption, .. } => {
             let sr = screen_rect(xf, *rect);
-            painter.rect_filled(sr, CornerRadius::same(2), Color32::from_rgba_unmultiplied(240, 244, 250, 220));
-            painter.rect_stroke(sr, CornerRadius::same(2), stroke, egui::StrokeKind::Inside);
-            painter.text(sr.center(), egui::Align2::CENTER_CENTER, format!("[Imagen: {caption}]"), FontId::proportional(11.0), stroke_col);
+            if let Some(tex) = image_textures.get(&m.id) {
+                painter.image(
+                    tex.id(),
+                    sr,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                painter.rect_stroke(sr, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            } else {
+                painter.rect_filled(sr, CornerRadius::same(2), Color32::from_rgba_unmultiplied(240, 244, 250, 220));
+                painter.rect_stroke(sr, CornerRadius::same(2), stroke, egui::StrokeKind::Inside);
+                painter.text(sr.center(), egui::Align2::CENTER_CENTER, format!("[Imagen: {caption}]"), FontId::proportional(11.0), stroke_col);
+            }
         }
         MarkupKind::Legend { pos, title, width_pt } => {
             let row_h = 18.0;
@@ -2299,6 +2356,7 @@ fn draw_box_shape(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_polygon_with_fill_and_hatch(
     painter: &Painter,
     xf: PageTransform,
@@ -2578,6 +2636,11 @@ fn draw_creation_preview(
                 let spts: Vec<Pos2> = sample_ellipse(rect, 32).into_iter().map(to_pos).collect();
                 painter.add(egui::Shape::closed_line(spts, stroke));
             }
+            ActiveTool::Snapshot => {
+                let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
+                painter.rect_filled(r, CornerRadius::ZERO, theme.accent_cyan.gamma_multiply(0.12));
+                draw_dashed_rect(painter, r, Stroke::new(1.8, theme.accent_cyan), 6.0, 4.0);
+            }
             _ => {
                 let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
                 painter.rect_stroke(r, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
@@ -2606,11 +2669,23 @@ fn draw_creation_preview(
             painter.line_segment([sr.center(), to_pos(*current)], stroke);
         }
         CreationState::Poly {
-            points, current, ..
+            tool,
+            points,
+            current,
+            ..
         } => {
-            let mut spts: Vec<Pos2> = points.iter().copied().map(to_pos).collect();
-            spts.push(to_pos(*current));
-            painter.add(egui::Shape::line(spts, stroke));
+            let mut all_pts = points.clone();
+            all_pts.push(*current);
+            if *tool == ActiveTool::Cloud && all_pts.len() >= 3 {
+                let cloud = generate_cloud_polyline(&all_pts, style.cloud_arc_size as f64);
+                let spts: Vec<Pos2> = cloud.into_iter().map(to_pos).collect();
+                if spts.len() >= 2 {
+                    painter.add(egui::Shape::closed_line(spts, stroke));
+                }
+            } else {
+                let spts: Vec<Pos2> = all_pts.into_iter().map(to_pos).collect();
+                painter.add(egui::Shape::line(spts, stroke));
+            }
             for pt in points {
                 painter.circle_filled(to_pos(*pt), 3.0, theme.accent_red);
             }
@@ -2677,18 +2752,53 @@ fn draw_magnifier_loupe(
     }
 }
 
-fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(n >> 18) & 63] as char);
-        out.push(TABLE[(n >> 12) & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n & 63] as char } else { '=' });
-    }
-    out
+fn draw_uncalibrated_scale_banner(
+    ctx: &egui::Context,
+    pane_rect: Rect,
+    theme: &RedBimTheme,
+    actions: &mut Vec<UiAction>,
+) {
+    let bw = 445.0_f32.min((pane_rect.width() - 24.0).max(200.0));
+    let pos = Pos2::new(pane_rect.center().x - bw * 0.5, pane_rect.top() + 8.0);
+    egui::Area::new(egui::Id::unique("uncalibrated_scale_banner"))
+        .fixed_pos(pos)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme.panel_bg)
+                .stroke(Stroke::new(1.2, theme.accent_amber))
+                .corner_radius(CornerRadius::same(6))
+                .inner_margin(egui::Margin::symmetric(10, 5))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Sin escala calibrada ·")
+                                .size(11.5)
+                                .strong()
+                                .color(theme.accent_amber),
+                        );
+                        for ratio in [50.0, 100.0, 200.0] {
+                            if ui.small_button(format!("1:{ratio:.0}")).clicked() {
+                                actions.push(UiAction::ApplyPageScale {
+                                    scale: PageScale::from_metric_ratio(ratio),
+                                    apply_all: false,
+                                });
+                            }
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Calibrar 2 pts")
+                                        .size(11.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(theme.accent_red),
+                            )
+                            .clicked()
+                        {
+                            actions.push(UiAction::StartTwoPointCalibration);
+                        }
+                    });
+                });
+        });
 }

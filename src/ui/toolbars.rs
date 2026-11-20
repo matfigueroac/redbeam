@@ -124,6 +124,7 @@ pub fn draw_main_toolbar(
             ActiveTool::Stamp,
             ActiveTool::Image,
             ActiveTool::Legend,
+            ActiveTool::Snapshot,
         ] {
             if icon_button(
                 ui,

@@ -1,4 +1,4 @@
-use crate::model::document::DocumentTab;
+use crate::model::document::{AlignKind, DocumentTab};
 use crate::model::scale::{IMPERIAL_PRESETS, METRIC_PRESETS, PageScale};
 use crate::model::settings::{AppSettings, CsvDelimiter, ThemeMode};
 use crate::model::tool_chest::ActiveTool;
@@ -115,6 +115,10 @@ pub fn draw_menu_bar(
                 actions.push(UiAction::ImportMarkupsJson);
                 ui.close();
             }
+            if ui.button("Combinar PDFs...").clicked() {
+                actions.push(UiAction::CombinePdfs);
+                ui.close();
+            }
             ui.separator();
             if ui.button("Salir").clicked() {
                 actions.push(UiAction::ExitApp);
@@ -186,6 +190,25 @@ pub fn draw_menu_bar(
                 actions.push(UiAction::UngroupSelected);
                 ui.close();
             }
+            ui.add_enabled_ui(multi_sel, |ui| {
+                ui.menu_button("Alinear y distribuir", |ui| {
+                    for (kind, label) in [
+                        (AlignKind::Left, "Alinear a la izquierda"),
+                        (AlignKind::CenterX, "Centrar horizontalmente"),
+                        (AlignKind::Right, "Alinear a la derecha"),
+                        (AlignKind::Top, "Alinear arriba"),
+                        (AlignKind::CenterY, "Centrar verticalmente"),
+                        (AlignKind::Bottom, "Alinear abajo"),
+                        (AlignKind::DistributeH, "Distribuir horizontalmente"),
+                        (AlignKind::DistributeV, "Distribuir verticalmente"),
+                    ] {
+                        if ui.button(label).clicked() {
+                            actions.push(UiAction::AlignSelected(kind));
+                            ui.close();
+                        }
+                    }
+                });
+            });
             if ui
                 .add_enabled(has_doc, egui::Button::new("Seleccionar todo  (Ctrl+A)"))
                 .clicked()
@@ -299,6 +322,21 @@ pub fn draw_menu_bar(
                 actions.push(UiAction::DeletePage(page_idx));
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .add_enabled(has_doc, egui::Button::new("Extraer página actual a PDF..."))
+                .clicked()
+            {
+                actions.push(UiAction::ExtractCurrentPage);
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_doc, egui::Button::new("Comparar con otro PDF..."))
+                .clicked()
+            {
+                actions.push(UiAction::CompareWithPdf);
+                ui.close();
+            }
         });
 
         ui.menu_button("Herramientas", |ui| {
@@ -321,6 +359,7 @@ pub fn draw_menu_bar(
                 ActiveTool::Stamp,
                 ActiveTool::Image,
                 ActiveTool::Legend,
+                ActiveTool::Snapshot,
             ] {
                 if ui.button(tool.label_es()).clicked() {
                     actions.push(UiAction::SetTool(tool));

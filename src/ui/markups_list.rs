@@ -16,6 +16,24 @@ pub enum SortColumn {
     Author,
     Status,
     Measurement,
+    Total,
+}
+
+struct MarkupRow {
+    id: Uuid,
+    page: usize,
+    kind: String,
+    subject: String,
+    label: String,
+    author: String,
+    status: MarkupStatus,
+    layer: String,
+    comment: String,
+    length_m: Option<f64>,
+    area_m2: Option<f64>,
+    volume_m3: Option<f64>,
+    count: Option<usize>,
+    total_cost: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -68,12 +86,12 @@ pub fn draw_markups_list_panel(
             if ui.button("Exportar CSV (Chile ;)").clicked() {
                 actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
             }
-            if ui.button("Insertar Leyenda").clicked() {
-                if let Some(p) = tab.active_page() {
-                    actions.push(UiAction::InsertLegendOnCurrentPage(
-                        crate::geometry::math::Point2::new(p.width_pt * 0.08, p.height_pt * 0.12),
-                    ));
-                }
+            if ui.button("Insertar Leyenda").clicked()
+                && let Some(p) = tab.active_page()
+            {
+                actions.push(UiAction::InsertLegendOnCurrentPage(
+                    crate::geometry::math::Point2::new(p.width_pt * 0.08, p.height_pt * 0.12),
+                ));
             }
         });
     });
@@ -83,13 +101,13 @@ pub fn draw_markups_list_panel(
     let cur_page = tab.active_page_index();
     let q = state.filter_text.trim().to_lowercase();
 
-    let mut rows: Vec<(Uuid, usize, String, String, String, String, MarkupStatus, String, String, Option<f64>, Option<f64>, Option<f64>, Option<usize>)> =
-        Vec::new();
+    let mut rows: Vec<MarkupRow> = Vec::new();
 
     let mut sum_len_m = 0.0;
     let mut sum_area_m2 = 0.0;
     let mut sum_vol_m3 = 0.0;
     let mut sum_count = 0usize;
+    let mut sum_cost = 0.0;
 
     for m in &tab.markups {
         if state.current_page_only && m.page_index != cur_page {
@@ -131,39 +149,47 @@ pub fn draw_markups_list_panel(
         if let Some(c) = metrics.count {
             sum_count += c;
         }
+        let row_cost = m.total_cost(&page.scale, &page.viewports);
+        if let Some(tc) = row_cost {
+            sum_cost += tc;
+        }
 
-        let meas_str = metrics.primary_display.unwrap_or_default();
-        rows.push((
-            m.id,
-            m.page_index,
-            m.type_name_es().to_string(),
-            m.subject.clone(),
-            m.label.clone(),
-            m.author.clone(),
-            m.status,
-            m.layer.clone(),
-            m.comment.clone(),
-            metrics.length_m,
-            metrics.area_m2,
-            metrics.volume_m3,
-            metrics.count,
-        ));
-        let _ = meas_str;
+        rows.push(MarkupRow {
+            id: m.id,
+            page: m.page_index,
+            kind: m.type_name_es().to_string(),
+            subject: m.subject.clone(),
+            label: m.label.clone(),
+            author: m.author.clone(),
+            status: m.status,
+            layer: m.layer.clone(),
+            comment: m.comment.clone(),
+            length_m: metrics.length_m,
+            area_m2: metrics.area_m2,
+            volume_m3: metrics.volume_m3,
+            count: metrics.count,
+            total_cost: row_cost,
+        });
     }
 
     rows.sort_by(|a, b| {
         let ord = match state.sort_col {
-            SortColumn::Page => a.1.cmp(&b.1),
-            SortColumn::Type => a.2.cmp(&b.2),
-            SortColumn::Subject => a.3.cmp(&b.3),
-            SortColumn::Author => a.5.cmp(&b.5),
-            SortColumn::Status => a.6.label().cmp(b.6.label()),
+            SortColumn::Page => a.page.cmp(&b.page),
+            SortColumn::Type => a.kind.cmp(&b.kind),
+            SortColumn::Subject => a.subject.cmp(&b.subject),
+            SortColumn::Author => a.author.cmp(&b.author),
+            SortColumn::Status => a.status.label().cmp(b.status.label()),
             SortColumn::Measurement => a
-                .9
-                .or(a.10)
-                .or(a.11)
+                .length_m
+                .or(a.area_m2)
+                .or(a.volume_m3)
                 .unwrap_or(0.0)
-                .partial_cmp(&b.9.or(b.10).or(b.11).unwrap_or(0.0))
+                .partial_cmp(&b.length_m.or(b.area_m2).or(b.volume_m3).unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal),
+            SortColumn::Total => a
+                .total_cost
+                .unwrap_or(0.0)
+                .partial_cmp(&b.total_cost.unwrap_or(0.0))
                 .unwrap_or(std::cmp::Ordering::Equal),
         };
         if state.sort_asc { ord } else { ord.reverse() }
@@ -180,7 +206,8 @@ pub fn draw_markups_list_panel(
             (SortColumn::Page, "Pág.", 42.0),
             (SortColumn::Author, "Autor", 95.0),
             (SortColumn::Status, "Estado", 100.0),
-            (SortColumn::Measurement, "Medición", 120.0),
+            (SortColumn::Measurement, "Medición", 115.0),
+            (SortColumn::Total, "Total ($)", 85.0),
         ] {
             let arrow = if state.sort_col == col {
                 if state.sort_asc { " ▲" } else { " ▼" }
@@ -212,41 +239,38 @@ pub fn draw_markups_list_panel(
         .id_salt("markups_list_rows")
         .max_height(scroll_h)
         .show(ui, |ui| {
-            for (id, pg, kind_s, subj, label, author, st, layer, comment, lm, am2, vm3, cnt) in
-                &rows
-            {
-                let is_sel = selected_ids.contains(id);
-                let page_scale = &tab.pages[*pg].scale;
-                let meas_txt = if let Some(v) = vm3 {
-                    format_volume(*v, page_scale.volume_unit, page_scale.precision)
-                } else if let Some(v) = am2 {
-                    format_area(*v, page_scale.area_unit, page_scale.precision)
-                } else if let Some(v) = lm {
-                    format_length(*v, page_scale.display_unit, page_scale.precision)
-                } else if let Some(c) = cnt {
+            for row in &rows {
+                let is_sel = selected_ids.contains(&row.id);
+                let page_scale = &tab.pages[row.page].scale;
+                let meas_txt = if let Some(v) = row.volume_m3 {
+                    format_volume(v, page_scale.volume_unit, page_scale.precision)
+                } else if let Some(v) = row.area_m2 {
+                    format_area(v, page_scale.area_unit, page_scale.precision)
+                } else if let Some(v) = row.length_m {
+                    format_length(v, page_scale.display_unit, page_scale.precision)
+                } else if let Some(c) = row.count {
                     format!("{c} und")
                 } else {
                     "—".to_string()
                 };
 
                 ui.horizontal(|ui| {
-                    let row_lbl = format!("{kind_s}");
                     if ui
                         .add_sized(
                             [96.0, 20.0],
-                            egui::Button::new(RichText::new(row_lbl).size(11.5))
+                            egui::Button::new(RichText::new(&row.kind).size(11.5))
                                 .selected(is_sel)
                                 .frame(is_sel),
                         )
                         .clicked()
                     {
-                        actions.push(UiAction::JumpToMarkup(*id));
+                        actions.push(UiAction::JumpToMarkup(row.id));
                     }
 
-                    let subj_disp = if label.is_empty() {
-                        subj.clone()
+                    let subj_disp = if row.label.is_empty() {
+                        row.subject.clone()
                     } else {
-                        format!("{subj} ({label})")
+                        format!("{} ({})", row.subject, row.label)
                     };
                     if ui
                         .add_sized(
@@ -257,21 +281,21 @@ pub fn draw_markups_list_panel(
                         )
                         .clicked()
                     {
-                        actions.push(UiAction::JumpToMarkup(*id));
+                        actions.push(UiAction::JumpToMarkup(row.id));
                     }
 
                     ui.add_sized(
                         [42.0, 20.0],
-                        egui::Label::new(RichText::new(format!("{}", pg + 1)).size(11.5)),
+                        egui::Label::new(RichText::new(format!("{}", row.page + 1)).size(11.5)),
                     );
                     ui.add_sized(
                         [95.0, 20.0],
-                        egui::Label::new(RichText::new(author).size(11.5)).truncate(),
+                        egui::Label::new(RichText::new(&row.author).size(11.5)).truncate(),
                     );
 
-                    let mut st_cur = *st;
+                    let mut st_cur = row.status;
                     let bc = st_cur.badge_color();
-                    egui::ComboBox::from_id_salt(("ml_st", *id))
+                    egui::ComboBox::from_id_salt(("ml_st", row.id))
                         .selected_text(
                             RichText::new(st_cur.label())
                                 .size(11.0)
@@ -284,13 +308,13 @@ pub fn draw_markups_list_panel(
                                     .selectable_value(&mut st_cur, opt, opt.label())
                                     .changed()
                                 {
-                                    status_update = Some((*id, st_cur));
+                                    status_update = Some((row.id, st_cur));
                                 }
                             }
                         });
 
                     ui.add_sized(
-                        [120.0, 20.0],
+                        [115.0, 20.0],
                         egui::Label::new(
                             RichText::new(meas_txt)
                                 .size(11.5)
@@ -299,7 +323,25 @@ pub fn draw_markups_list_panel(
                         ),
                     );
 
-                    let text_preview = format!("[{layer}] {}", comment.replace('\n', " "));
+                    let cost_txt = row
+                        .total_cost
+                        .map(|c| format!("$ {:.0}", c))
+                        .unwrap_or_else(|| "—".to_string());
+                    ui.add_sized(
+                        [85.0, 20.0],
+                        egui::Label::new(
+                            RichText::new(cost_txt)
+                                .size(11.5)
+                                .color(if row.total_cost.is_some() {
+                                    theme.accent_green
+                                } else {
+                                    theme.text_muted
+                                }),
+                        ),
+                    );
+
+                    let text_preview =
+                        format!("[{}] {}", row.layer, row.comment.replace('\n', " "));
                     if ui
                         .add(
                             egui::Label::new(
@@ -312,7 +354,7 @@ pub fn draw_markups_list_panel(
                         )
                         .clicked()
                     {
-                        actions.push(UiAction::JumpToMarkup(*id));
+                        actions.push(UiAction::JumpToMarkup(row.id));
                     }
                 });
             }
@@ -336,13 +378,19 @@ pub fn draw_markups_list_panel(
                     .strong()
                     .size(11.5),
             );
+            let cost_footer = if sum_cost > 0.0 {
+                format!("   ·   Total: $ {:.0}", sum_cost)
+            } else {
+                String::new()
+            };
             ui.label(
                 RichText::new(format!(
-                    "Long: {}   ·   Área: {}   ·   Vol: {}   ·   Conteo: {} und",
+                    "Long: {}   ·   Área: {}   ·   Vol: {}   ·   Conteo: {} und{}",
                     format_length(sum_len_m, s.display_unit, s.precision),
                     format_area(sum_area_m2, s.area_unit, s.precision),
                     format_volume(sum_vol_m3, s.volume_unit, s.precision),
-                    sum_count
+                    sum_count,
+                    cost_footer
                 ))
                 .strong()
                 .size(11.5)
