@@ -1,13 +1,16 @@
 use crate::geometry::hit_test::{
-    HandleKind, apply_handle_drag, box_rect_anchor, hit_test_handle, hit_test_markup, list_handles,
-    markup_bounds, translate_markup,
+    HandleKind, apply_handle_drag, box_rect_anchor, hit_test_handle, hit_test_markup,
+    is_measure_length_offset_drag_hit, list_handles, markup_bounds, translate_markup,
 };
 use crate::geometry::math::{
     PageTransform, Point2, Rect2, angle_three_points_deg, clip_hatch_lines,
     dimension_offset_segment, generate_cloud_polyline, polygon_centroid, sample_ellipse,
     sample_three_point_arc, triangulate_polygon_with_holes,
 };
-use crate::geometry::snap::{SnapIndex, SnapKind, SnapResult, apply_ortho_constraint, find_best_snap};
+use crate::geometry::snap::{
+    SnapIndex, SnapKind, SnapResult, apply_ortho_constraint, apply_soft_hv_snap,
+    find_best_snap_excluding,
+};
 use crate::model::document::{AlignKind, DocumentTab, SplitViewMode};
 use crate::model::markup::{
     BoxShape, CountStyle, HatchPattern, LineEnd, LineStyle, Markup, MarkupKind, MarkupStatus,
@@ -773,6 +776,7 @@ fn handle_canvas_input(
     let space_down = ui.input(|i| i.key_down(egui::Key::Space));
     let shift_down = ui.input(|i| i.modifiers.shift);
     let ctrl_down = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+    let alt_down = ui.input(|i| i.modifiers.alt);
     let middle_down = ui.input(|i| i.pointer.middle_down());
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
     let primary_down = ui.input(|i| i.pointer.primary_down());
@@ -827,8 +831,17 @@ fn handle_canvas_input(
     let raw_pt = xf.screen_to_page(screen_pos.x as f64, screen_pos.y as f64);
     let tol_pt = 10.0 / xf.scale.max(0.05);
 
-    let snap_res = if *active_tool != ActiveTool::Select && *active_tool != ActiveTool::Pan {
-        find_best_snap(
+    let dragging_point_handle = match &canvas.drag {
+        Some(DragMode::MoveHandle {
+            markup_id, handle, ..
+        }) if *handle != HandleKind::MeasureOffset && !alt_down => Some(*markup_id),
+        _ => None,
+    };
+
+    let snap_res = if (*active_tool != ActiveTool::Select && *active_tool != ActiveTool::Pan)
+        || dragging_point_handle.is_some()
+    {
+        find_best_snap_excluding(
             raw_pt,
             tol_pt,
             &settings.snap,
@@ -836,6 +849,7 @@ fn handle_canvas_input(
             &tab.markups,
             cam_page_idx,
             grid_step_pt,
+            dragging_point_handle,
         )
     } else {
         None
@@ -844,8 +858,11 @@ fn handle_canvas_input(
     canvas.hover_page_pt = Some(pt);
     canvas.hover_snap = snap_res;
 
-    // Paint Snap indicator + Magnifier Loupe during Calibrate or Measurement tools
-    if in_pane && *active_tool != ActiveTool::Select && *active_tool != ActiveTool::Pan {
+    // Paint Snap indicator + Magnifier Loupe during Calibrate, Measurement tools, or Handle editing
+    if in_pane
+        && ((*active_tool != ActiveTool::Select && *active_tool != ActiveTool::Pan)
+            || dragging_point_handle.is_some())
+    {
         let overlay_painter = ui.painter_at(pane_rect);
         if let Some(sr) = snap_res {
             let (sx, sy) = xf.page_to_screen(sr.point);
@@ -876,16 +893,17 @@ fn handle_canvas_input(
                 }
             }
         }
-        if matches!(
-            *active_tool,
-            ActiveTool::Calibrate
-                | ActiveTool::MeasureLength
-                | ActiveTool::MeasurePolylength
-                | ActiveTool::MeasurePerimeter
-                | ActiveTool::MeasureArea
-                | ActiveTool::MeasureVolume
-                | ActiveTool::MeasureAngle
-        ) && (snap_res.is_some() || canvas.creation.is_some())
+        if (dragging_point_handle.is_some()
+            || (matches!(
+                *active_tool,
+                ActiveTool::Calibrate
+                    | ActiveTool::MeasureLength
+                    | ActiveTool::MeasurePolylength
+                    | ActiveTool::MeasurePerimeter
+                    | ActiveTool::MeasureArea
+                    | ActiveTool::MeasureVolume
+                    | ActiveTool::MeasureAngle
+            ) && (snap_res.is_some() || canvas.creation.is_some())))
             && let Some(tex) = base_tex
         {
             draw_magnifier_loupe(
@@ -915,6 +933,51 @@ fn handle_canvas_input(
 
     // If Select tool active: handle selection, handles, dragging, double-click inline edit & context menu
     if *active_tool == ActiveTool::Select {
+        // Smart hover cursor in Select mode for MeasureLength offset slide & endpoint handles
+        if in_pane && canvas.drag.is_none() {
+            let mut set_cursor = false;
+            for &sid in &tab.selected_ids {
+                if let Some(m) = tab.markups.iter().find(|m| m.id == sid && m.page_index == cam_page_idx && !m.locked) {
+                    if let Some(h) = hit_test_handle(m, raw_pt, tol_pt * 1.1) {
+                        if h == HandleKind::MeasureOffset {
+                            if let MarkupKind::MeasureLength { start, end, .. } = &m.kind {
+                                let d = *end - *start;
+                                let icon = if d.x.abs() >= d.y.abs() {
+                                    CursorIcon::ResizeVertical
+                                } else {
+                                    CursorIcon::ResizeHorizontal
+                                };
+                                ui.ctx().set_cursor_icon(icon);
+                                set_cursor = true;
+                                break;
+                            }
+                        } else {
+                            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                            set_cursor = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !set_cursor
+                && !alt_down
+                && let Some(m) = tab
+                    .markups
+                    .iter()
+                    .rev()
+                    .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && !m.locked && is_measure_length_offset_drag_hit(m, raw_pt, tol_pt))
+                && let MarkupKind::MeasureLength { start, end, .. } = &m.kind
+            {
+                let d = *end - *start;
+                let icon = if d.x.abs() >= d.y.abs() {
+                    CursorIcon::ResizeVertical
+                } else {
+                    CursorIcon::ResizeHorizontal
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+        }
+
         if double_clicked
             && in_pane
             && let Some(m) = tab
@@ -948,22 +1011,37 @@ fn handle_canvas_input(
             }
 
             // Check markup body hit top-to-bottom
-            if let Some(hit_id) = tab
+            if let Some(hit_markup) = tab
                 .markups
                 .iter()
                 .rev()
                 .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, raw_pt, tol_pt))
-                .map(|m| m.id)
             {
+                let hit_id = hit_markup.id;
+                let hit_locked = hit_markup.locked;
+                let drag_measure_offset = !alt_down
+                    && !shift_down
+                    && !ctrl_down
+                    && !hit_locked
+                    && tab.selected_ids.len() <= 1
+                    && is_measure_length_offset_drag_hit(hit_markup, raw_pt, tol_pt);
                 if shift_down || ctrl_down {
                     tab.toggle_select(hit_id);
                 } else if !tab.selected_ids.contains(&hit_id) {
                     tab.select_only(hit_id);
                 }
-                canvas.drag = Some(DragMode::MoveSelected {
-                    last_pt: raw_pt,
-                    pushed_undo: false,
-                });
+                if drag_measure_offset {
+                    canvas.drag = Some(DragMode::MoveHandle {
+                        markup_id: hit_id,
+                        handle: HandleKind::MeasureOffset,
+                        pushed_undo: false,
+                    });
+                } else {
+                    canvas.drag = Some(DragMode::MoveSelected {
+                        last_pt: raw_pt,
+                        pushed_undo: false,
+                    });
+                }
                 return;
             }
 
@@ -990,7 +1068,83 @@ fn handle_canvas_input(
                         *pushed_undo = true;
                     }
                     if let Some(m) = tab.markups.iter_mut().find(|x| x.id == mid) {
-                        apply_handle_drag(m, h, raw_pt);
+                        if h == HandleKind::MeasureOffset {
+                            if let MarkupKind::MeasureLength { start, end, .. } = &m.kind {
+                                let d = *end - *start;
+                                let icon = if d.x.abs() >= d.y.abs() {
+                                    CursorIcon::ResizeVertical
+                                } else {
+                                    CursorIcon::ResizeHorizontal
+                                };
+                                ui.ctx().set_cursor_icon(icon);
+                            }
+                            apply_handle_drag(m, h, raw_pt);
+                            if let MarkupKind::MeasureLength { offset_pt, .. } = &mut m.kind
+                                && offset_pt.abs() < 3.0 / xf.scale.max(0.05)
+                            {
+                                *offset_pt = 0.0;
+                            }
+                        } else {
+                            let mut hv_guide: Option<(Point2, Point2)> = None;
+                            let target_pt = if snap_res.is_none() && !alt_down {
+                                let anchor = match (&m.kind, h) {
+                                    (
+                                        MarkupKind::Line { start: _, end }
+                                        | MarkupKind::Arrow { start: _, end }
+                                        | MarkupKind::MeasureLength { start: _, end, .. }
+                                        | MarkupKind::MeasureDiameter {
+                                            p1: _,
+                                            p2: end,
+                                            ..
+                                        },
+                                        HandleKind::LineStart,
+                                    ) => Some(*end),
+                                    (
+                                        MarkupKind::Line { start, end: _ }
+                                        | MarkupKind::Arrow { start, end: _ }
+                                        | MarkupKind::MeasureLength { start, end: _, .. }
+                                        | MarkupKind::MeasureDiameter {
+                                            p1: start,
+                                            p2: _,
+                                            ..
+                                        },
+                                        HandleKind::LineEnd,
+                                    ) => Some(*start),
+                                    _ => None,
+                                };
+                                if let Some(orig) = anchor {
+                                    if shift_down || settings.snap.ortho_45 {
+                                        let p = apply_ortho_constraint(orig, pt, true);
+                                        hv_guide = Some((orig, p));
+                                        p
+                                    } else {
+                                        let (p, locked_hv) = apply_soft_hv_snap(orig, pt, 3.5);
+                                        if locked_hv {
+                                            hv_guide = Some((orig, p));
+                                        }
+                                        p
+                                    }
+                                } else {
+                                    pt
+                                }
+                            } else {
+                                pt
+                            };
+                            apply_handle_drag(m, h, target_pt);
+                            if let Some((ga, gb)) = hv_guide {
+                                let p = ui.painter_at(pane_rect);
+                                let (ax, ay) = xf.page_to_screen(ga);
+                                let (bx, by) = xf.page_to_screen(gb);
+                                draw_dashed_segment(
+                                    &p,
+                                    Pos2::new(ax, ay),
+                                    Pos2::new(bx, by),
+                                    Stroke::new(1.0, theme.accent_cyan.gamma_multiply(0.8)),
+                                    4.0,
+                                    4.0,
+                                );
+                            }
+                        }
                     }
                 } else {
                     canvas.drag = None;
@@ -1001,20 +1155,61 @@ fn handle_canvas_input(
                 pushed_undo,
             }) => {
                 if primary_down {
-                    let delta = raw_pt - *last_pt;
-                    if delta.len() > 0.05 {
-                        if !*pushed_undo {
-                            tab.push_undo();
-                            *pushed_undo = true;
-                        }
-                        *last_pt = raw_pt;
+                    let raw_delta = raw_pt - *last_pt;
+                    let fine_scale = if alt_down { 0.2 } else { 1.0 };
+                    let mut delta = Point2::new(raw_delta.x * fine_scale, raw_delta.y * fine_scale);
+                    if delta.len() > 0.02 {
                         let sel = tab.selected_ids.clone();
-                        for m in &mut tab.markups {
-                            if sel.contains(&m.id) {
-                                translate_markup(m, delta);
+                        let any_unlocked = tab
+                            .markups
+                            .iter()
+                            .any(|m| sel.contains(&m.id) && !m.locked);
+                        if any_unlocked {
+                            if !*pushed_undo {
+                                tab.push_undo();
+                                *pushed_undo = true;
+                            }
+                            *last_pt = raw_pt;
+                            for m in &mut tab.markups {
+                                if sel.contains(&m.id) && !m.locked {
+                                    translate_markup(m, delta);
+                                }
+                            }
+                            // Magnetic endpoint snap when dragging a single unlocked line/cota (without Alt)
+                            if !alt_down
+                                && sel.len() == 1
+                                && settings.snap.snap_to_content
+                                && let Some(idx) = snap_index
+                                && let Some(m) = tab.markups.iter_mut().find(|m| m.id == sel[0] && !m.locked)
+                            {
+                                let snap_rad = tol_pt * 0.75;
+                                let anchor_snap = match &m.kind {
+                                    MarkupKind::MeasureLength { start, end, .. }
+                                    | MarkupKind::Line { start, end }
+                                    | MarkupKind::Arrow { start, end } => {
+                                        let s_hit = idx.query_nearest_corner(*start, snap_rad).map(|h| h.point - *start);
+                                        let e_hit = idx.query_nearest_corner(*end, snap_rad).map(|h| h.point - *end);
+                                        match (s_hit, e_hit) {
+                                            (Some(ds), Some(de)) => {
+                                                if ds.len() <= de.len() { Some(ds) } else { Some(de) }
+                                            }
+                                            (Some(ds), None) => Some(ds),
+                                            (None, Some(de)) => Some(de),
+                                            (None, None) => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(adj) = anchor_snap
+                                    && adj.len() > 1e-4
+                                {
+                                    translate_markup(m, adj);
+                                    *last_pt = *last_pt + adj;
+                                }
                             }
                         }
                     }
+                    let _ = &mut delta;
                 } else {
                     canvas.drag = None;
                 }
@@ -1052,6 +1247,50 @@ fn handle_canvas_input(
             _ => {}
         }
 
+        // Subtle arrow-key nudging for selected markups (1px, Shift=10px, Ctrl=0.25px)
+        if canvas.inline_edit.is_none()
+            && !tab.selected_ids.is_empty()
+            && !ui.ctx().egui_wants_keyboard_input()
+        {
+            let step_px = if ctrl_down {
+                0.25
+            } else if shift_down {
+                10.0
+            } else {
+                1.0
+            };
+            let step_pt = step_px / xf.scale.max(0.05);
+            let (dx, dy) = ui.input(|i| {
+                let mut x = 0.0;
+                let mut y = 0.0;
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    x -= step_pt;
+                }
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    x += step_pt;
+                }
+                if i.key_pressed(egui::Key::ArrowUp) {
+                    y -= step_pt;
+                }
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    y += step_pt;
+                }
+                (x, y)
+            });
+            if dx != 0.0 || dy != 0.0 {
+                let sel = tab.selected_ids.clone();
+                if tab.markups.iter().any(|m| sel.contains(&m.id) && !m.locked) {
+                    tab.push_undo();
+                    let delta = Point2::new(dx, dy);
+                    for m in &mut tab.markups {
+                        if sel.contains(&m.id) && !m.locked {
+                            translate_markup(m, delta);
+                        }
+                    }
+                }
+            }
+        }
+
         // Right-click context menu
         if secondary_clicked
             && in_pane
@@ -1080,6 +1319,26 @@ fn handle_canvas_input(
                 }
                 if can_cutout && ui.button("Agregar Recorte (descontar área)").clicked() {
                     actions.push(UiAction::CreateCutoutForMarkup(sel_snapshot[0]));
+                    ui.close();
+                }
+                if ui
+                    .button("Ajustar puntos a esquinas (Auto-Snap)")
+                    .clicked()
+                {
+                    actions.push(UiAction::SnapSelectedToContent);
+                    ui.close();
+                }
+                let any_locked = tab
+                    .markups
+                    .iter()
+                    .any(|m| sel_snapshot.contains(&m.id) && m.locked);
+                let lock_lbl = if any_locked {
+                    "Desbloquear puntos"
+                } else {
+                    "Fijar / Bloquear"
+                };
+                if ui.button(lock_lbl).clicked() {
+                    actions.push(UiAction::ToggleLockSelected);
                     ui.close();
                 }
                 if sel_snapshot.len() >= 2 {
@@ -1155,12 +1414,39 @@ fn handle_canvas_input(
     // --- Interactive Creation Tools ---
     let mut active_hud_text: Option<String> = None;
 
-    // Apply orthogonal constraint when Shift or Ortho setting is active relative to last anchor
+    // Apply orthogonal constraint when Shift or Ortho setting is active relative to last anchor,
+    // or soft magnetic horizontal/vertical alignment for cotas/lines when not holding Alt.
     if let Some(origin) = creation_anchor(&canvas.creation)
-        && (shift_down || settings.snap.ortho_45)
         && snap_res.is_none()
+        && !alt_down
     {
-        pt = apply_ortho_constraint(origin, pt, true);
+        if shift_down || settings.snap.ortho_45 {
+            pt = apply_ortho_constraint(origin, pt, true);
+        } else if matches!(
+            *active_tool,
+            ActiveTool::MeasureLength
+                | ActiveTool::MeasurePolylength
+                | ActiveTool::MeasurePerimeter
+                | ActiveTool::Calibrate
+                | ActiveTool::Line
+                | ActiveTool::Arrow
+        ) {
+            let (snapped_pt, locked_hv) = apply_soft_hv_snap(origin, pt, 3.5);
+            if locked_hv {
+                pt = snapped_pt;
+                let p = ui.painter_at(pane_rect);
+                let (ax, ay) = xf.page_to_screen(origin);
+                let (bx, by) = xf.page_to_screen(pt);
+                draw_dashed_segment(
+                    &p,
+                    Pos2::new(ax, ay),
+                    Pos2::new(bx, by),
+                    Stroke::new(1.0, theme.accent_cyan.gamma_multiply(0.75)),
+                    4.0,
+                    4.0,
+                );
+            }
+        }
     }
 
     let finish_requested = double_clicked
@@ -2314,12 +2600,37 @@ fn draw_markup_on_canvas(
             ..
         } => {
             let (da, db, _) = dimension_offset_segment(*start, *end, *offset_pt);
-            let ext_stroke = Stroke::new(1.0, stroke_col.gamma_multiply(0.75));
-            painter.line_segment([to_pos(*start), to_pos(da)], ext_stroke);
-            painter.line_segment([to_pos(*end), to_pos(db)], ext_stroke);
+            let ext_vec = da - *start;
+            let ext_len = ext_vec.len();
+            let ext_stroke = Stroke::new(1.0, stroke_col.gamma_multiply(0.72));
+            if ext_len > 0.5 {
+                let dir = Point2::new(ext_vec.x / ext_len, ext_vec.y / ext_len);
+                let gap = (3.5 / xf.scale.max(0.05)).min(ext_len * 0.35);
+                let overshoot = 5.5 / xf.scale.max(0.05);
+                let ea0 = *start + dir * gap;
+                let ea1 = da + dir * overshoot;
+                let eb0 = *end + dir * gap;
+                let eb1 = db + dir * overshoot;
+                painter.line_segment([to_pos(ea0), to_pos(ea1)], ext_stroke);
+                painter.line_segment([to_pos(eb0), to_pos(eb1)], ext_stroke);
+            } else {
+                // Short tick marks even when offset_pt == 0
+                let d = *end - *start;
+                let l = d.len().max(1e-6);
+                let n = Point2::new(-d.y / l, d.x / l);
+                let tick = 5.0 / xf.scale.max(0.05);
+                painter.line_segment([to_pos(*start - n * tick), to_pos(*start + n * tick)], ext_stroke);
+                painter.line_segment([to_pos(*end - n * tick), to_pos(*end + n * tick)], ext_stroke);
+            }
             painter.line_segment([to_pos(da), to_pos(db)], stroke);
             draw_line_end(painter, to_pos(db), to_pos(da), m.style.start_end, stroke, stroke_col);
             draw_line_end(painter, to_pos(da), to_pos(db), m.style.end_end, stroke, stroke_col);
+            // Subtle vertex anchor markers at the exact measured points
+            if selected {
+                let anchor_col = stroke_col.gamma_multiply(0.85);
+                painter.circle_filled(to_pos(*start), 2.5, anchor_col);
+                painter.circle_filled(to_pos(*end), 2.5, anchor_col);
+            }
             if m.measurement_opts().is_some_and(|o| o.show_caption)
                 && let Some(disp) = &metrics.primary_display
             {
@@ -2411,15 +2722,29 @@ fn draw_markup_on_canvas(
         let b = markup_bounds(m);
         let sr = screen_rect(xf, b).expand(4.0);
         draw_dashed_rect(painter, sr, Stroke::new(1.2, theme.accent_cyan), 5.0, 4.0);
-        for (_, hpos) in list_handles(m) {
+        for (hkind, hpos) in list_handles(m) {
             let hp = to_pos(hpos);
-            painter.rect(
-                Rect::from_center_size(hp, Vec2::splat(7.5)),
-                CornerRadius::same(1),
-                Color32::WHITE,
-                Stroke::new(1.5, theme.accent_red),
-                egui::StrokeKind::Inside,
-            );
+            if hkind == HandleKind::MeasureOffset {
+                let r = 5.0;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        Pos2::new(hp.x, hp.y - r),
+                        Pos2::new(hp.x + r, hp.y),
+                        Pos2::new(hp.x, hp.y + r),
+                        Pos2::new(hp.x - r, hp.y),
+                    ],
+                    Color32::WHITE,
+                    Stroke::new(1.5, theme.accent_cyan),
+                ));
+            } else {
+                painter.rect(
+                    Rect::from_center_size(hp, Vec2::splat(7.5)),
+                    CornerRadius::same(1),
+                    Color32::WHITE,
+                    Stroke::new(1.5, theme.accent_red),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
     }
 }

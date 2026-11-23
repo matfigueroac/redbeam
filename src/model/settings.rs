@@ -33,6 +33,10 @@ impl CsvDelimiter {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: ThemeMode,
@@ -53,6 +57,14 @@ pub struct AppSettings {
     pub dimmer_opacity: f32,
     #[serde(default)]
     pub compact_tool_chest: bool,
+    #[serde(default = "default_true")]
+    pub panel_left_open: bool,
+    #[serde(default = "default_true")]
+    pub panel_right_open: bool,
+    #[serde(default = "default_true")]
+    pub panel_bottom_open: bool,
+    #[serde(default)]
+    pub panel_dpt_open: bool,
     pub recent_files: Vec<PathBuf>,
 }
 
@@ -79,6 +91,10 @@ impl Default for AppSettings {
             dimmer_enabled: false,
             dimmer_opacity: 0.45,
             compact_tool_chest: false,
+            panel_left_open: true,
+            panel_right_open: true,
+            panel_bottom_open: true,
+            panel_dpt_open: false,
             recent_files: Vec::new(),
         }
     }

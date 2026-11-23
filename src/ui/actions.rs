@@ -58,6 +58,8 @@ pub enum UiAction {
     AlignSelected(AlignKind),
     BringToFront,
     SendToBack,
+    SnapSelectedToContent,
+    ToggleLockSelected,
 
     SetTool(ActiveTool),
     ActivateToolChestItem(ToolChestItem),

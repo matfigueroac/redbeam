@@ -49,6 +49,7 @@ pub fn draw_markups_list_panel(
     ui: &mut egui::Ui,
     tab: Option<&mut DocumentTab>,
     state: &mut MarkupsListState,
+    bottom_open: &mut bool,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
@@ -57,14 +58,15 @@ pub fn draw_markups_list_panel(
         return;
     };
 
-    // Toolbar header
-    ui.horizontal(|ui| {
+    // Toolbar header (responsive wrap so controls never collide on narrower viewports)
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
         ui.label(RichText::new("Lista de marcas").strong().size(12.5));
         ui.separator();
         ui.add(
             egui::TextEdit::singleline(&mut state.filter_text)
-                .hint_text("Filtrar por asunto, comentario, autor...")
-                .desired_width(210.0),
+                .hint_text("Filtrar...")
+                .desired_width(160.0),
         );
         egui::ComboBox::from_id_salt("ml_status_filter")
             .selected_text(
@@ -73,25 +75,45 @@ pub fn draw_markups_list_panel(
                     .map(|s| s.label())
                     .unwrap_or("Todos los estados"),
             )
-            .width(135.0)
+            .width(125.0)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut state.status_filter, None, "Todos los estados");
                 for &st in MarkupStatus::ALL {
                     ui.selectable_value(&mut state.status_filter, Some(st), st.label());
                 }
             });
-        ui.checkbox(&mut state.current_page_only, "Solo página actual");
+        ui.checkbox(&mut state.current_page_only, "Solo pág. actual");
+
+        ui.separator();
+        if ui
+            .small_button("Leyenda")
+            .on_hover_text("Insertar tabla de leyenda de marcas en la página actual")
+            .clicked()
+            && let Some(p) = tab.active_page()
+        {
+            actions.push(UiAction::InsertLegendOnCurrentPage(
+                crate::geometry::math::Point2::new(p.width_pt * 0.08, p.height_pt * 0.12),
+            ));
+        }
+        if ui
+            .small_button("Exportar CSV")
+            .on_hover_text("Exportar Lista de marcas a CSV (separador ; para Excel Chile)")
+            .clicked()
+        {
+            actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Exportar CSV (Chile ;)").clicked() {
-                actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
-            }
-            if ui.button("Insertar Leyenda").clicked()
-                && let Some(p) = tab.active_page()
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("×").size(13.0).color(theme.text_secondary))
+                        .frame(false)
+                        .min_size(egui::vec2(20.0, 20.0)),
+                )
+                .on_hover_text("Ocultar Lista de marcas (F8)")
+                .clicked()
             {
-                actions.push(UiAction::InsertLegendOnCurrentPage(
-                    crate::geometry::math::Point2::new(p.width_pt * 0.08, p.height_pt * 0.12),
-                ));
+                *bottom_open = false;
             }
         });
     });

@@ -41,6 +41,58 @@ fn toolbar_group(
         });
 }
 
+fn tool_dropdown_group(
+    ui: &mut egui::Ui,
+    id: &str,
+    tooltip: &str,
+    tools: &[ActiveTool],
+    active_tool: ActiveTool,
+    has_doc: bool,
+    theme: &RedBimTheme,
+    actions: &mut Vec<UiAction>,
+) {
+    let any_active = tools.contains(&active_tool);
+    let label_txt = if any_active {
+        RichText::new("▾").size(12.0).strong().color(theme.accent_red)
+    } else {
+        RichText::new("▾").size(12.0).color(theme.text_secondary)
+    };
+    let btn = egui::Button::new(label_txt)
+        .fill(if any_active {
+            theme.accent_red.gamma_multiply(0.18)
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(if any_active {
+            Stroke::new(1.0, theme.accent_red)
+        } else {
+            Stroke::NONE
+        })
+        .corner_radius(CornerRadius::same(4))
+        .min_size(egui::vec2(18.0, 26.0));
+
+    let resp = ui.add_enabled(has_doc, btn).on_hover_text(tooltip);
+    let popup_id = ui.make_persistent_id(id);
+    if resp.clicked() {
+        egui::Popup::toggle_id(ui.ctx(), popup_id);
+    }
+    egui::Popup::from_toggle_button_response(&resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
+            ui.set_min_width(175.0);
+            for &tool in tools {
+                let is_cur = active_tool == tool;
+                if ui
+                    .selectable_label(is_cur, tool.label_es())
+                    .clicked()
+                {
+                    actions.push(UiAction::SetTool(tool));
+                }
+            }
+        });
+}
+
 pub fn draw_main_toolbar(
     ui: &mut egui::Ui,
     tab: Option<&DocumentTab>,
@@ -53,23 +105,15 @@ pub fn draw_main_toolbar(
     let can_redo = tab.is_some_and(|t| !t.redo_stack.is_empty());
 
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
 
+        // 1. Archivo + Deshacer/Rehacer (compacto)
         toolbar_group(ui, theme, |ui| {
-            if icon_button(ui, 26.0, IconKind::NewDoc, false, true, "Nuevo plano en blanco", theme).clicked() {
-                actions.push(UiAction::NewBlankDocument);
-            }
             if icon_button(ui, 26.0, IconKind::OpenFile, false, true, "Abrir PDF (Ctrl+O)", theme).clicked() {
                 actions.push(UiAction::OpenPdfDialog);
             }
             if icon_button(ui, 26.0, IconKind::SaveFile, false, has_doc, "Guardar PDF (Ctrl+S)", theme).clicked() {
                 actions.push(UiAction::SaveDocument);
-            }
-            if icon_button(ui, 26.0, IconKind::FlattenPdf, false, has_doc, "Exportar PDF aplanado", theme).clicked() {
-                actions.push(UiAction::ExportFlattenedPdf);
-            }
-            if icon_button(ui, 26.0, IconKind::ExportCsv, false, has_doc, "Exportar Lista de Marcas CSV", theme).clicked() {
-                actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
             }
             if icon_button(ui, 26.0, IconKind::Undo, false, can_undo, "Deshacer (Ctrl+Z)", theme).clicked() {
                 actions.push(UiAction::Undo);
@@ -77,8 +121,41 @@ pub fn draw_main_toolbar(
             if icon_button(ui, 26.0, IconKind::Redo, false, can_redo, "Rehacer (Ctrl+Y)", theme).clicked() {
                 actions.push(UiAction::Redo);
             }
+            let file_more_resp = ui
+                .add(
+                    egui::Button::new(RichText::new("▾").size(12.0).color(theme.text_secondary))
+                        .frame(false)
+                        .min_size(egui::vec2(18.0, 26.0)),
+                )
+                .on_hover_text("Más opciones de archivo y exportación");
+            let file_popup_id = ui.make_persistent_id("tb_file_more");
+            if file_more_resp.clicked() {
+                egui::Popup::toggle_id(ui.ctx(), file_popup_id);
+            }
+            egui::Popup::from_toggle_button_response(&file_more_resp)
+                .id(file_popup_id)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(175.0);
+                    if ui.button("Nuevo plano en blanco").clicked() {
+                        actions.push(UiAction::NewBlankDocument);
+                    }
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("Exportar PDF aplanado"))
+                        .clicked()
+                    {
+                        actions.push(UiAction::ExportFlattenedPdf);
+                    }
+                    if ui
+                        .add_enabled(has_doc, egui::Button::new("Exportar CSV (Chile ;)"))
+                        .clicked()
+                    {
+                        actions.push(UiAction::ExportCsv(CsvDelimiter::Semicolon));
+                    }
+                });
         });
 
+        // 2. Navegación
         toolbar_group(ui, theme, |ui| {
             for tool in [ActiveTool::Select, ActiveTool::Pan, ActiveTool::ZoomWindow] {
                 if icon_button(
@@ -97,14 +174,13 @@ pub fn draw_main_toolbar(
             }
         });
 
+        // 3. Comentarios y texto (esenciales + desplegable)
         toolbar_group(ui, theme, |ui| {
             for tool in [
                 ActiveTool::Note,
                 ActiveTool::TextBox,
-                ActiveTool::Typewriter,
                 ActiveTool::Callout,
                 ActiveTool::Cloud,
-                ActiveTool::CloudPlus,
             ] {
                 if icon_button(
                     ui,
@@ -120,23 +196,25 @@ pub fn draw_main_toolbar(
                     actions.push(UiAction::SetTool(tool));
                 }
             }
+            tool_dropdown_group(
+                ui,
+                "tb_more_text",
+                "Más herramientas de texto y revisión",
+                &[ActiveTool::Typewriter, ActiveTool::CloudPlus],
+                active_tool,
+                has_doc,
+                theme,
+                actions,
+            );
         });
 
+        // 4. Dibujo y formas (esenciales + desplegable)
         toolbar_group(ui, theme, |ui| {
             for tool in [
                 ActiveTool::Arrow,
                 ActiveTool::Line,
-                ActiveTool::Polyline,
-                ActiveTool::Arc,
                 ActiveTool::Rectangle,
-                ActiveTool::Ellipse,
-                ActiveTool::Polygon,
-                ActiveTool::Ink,
                 ActiveTool::Highlight,
-                ActiveTool::Stamp,
-                ActiveTool::Image,
-                ActiveTool::Legend,
-                ActiveTool::Snapshot,
             ] {
                 if icon_button(
                     ui,
@@ -152,8 +230,29 @@ pub fn draw_main_toolbar(
                     actions.push(UiAction::SetTool(tool));
                 }
             }
+            tool_dropdown_group(
+                ui,
+                "tb_more_shapes",
+                "Más formas y marcas (Polilínea, Arco, Elipse, Polígono, Tinta, Sello, Imagen...)",
+                &[
+                    ActiveTool::Polyline,
+                    ActiveTool::Arc,
+                    ActiveTool::Ellipse,
+                    ActiveTool::Polygon,
+                    ActiveTool::Ink,
+                    ActiveTool::Stamp,
+                    ActiveTool::Image,
+                    ActiveTool::Legend,
+                    ActiveTool::Snapshot,
+                ],
+                active_tool,
+                has_doc,
+                theme,
+                actions,
+            );
         });
 
+        // 5. Medición y escala (esenciales + desplegable)
         toolbar_group(ui, theme, |ui| {
             if icon_button(
                 ui,
@@ -170,16 +269,9 @@ pub fn draw_main_toolbar(
             }
             for tool in [
                 ActiveTool::MeasureLength,
-                ActiveTool::MeasurePolylength,
-                ActiveTool::MeasurePerimeter,
                 ActiveTool::MeasureArea,
-                ActiveTool::MeasureVolume,
-                ActiveTool::MeasureAngle,
-                ActiveTool::MeasureRadius,
-                ActiveTool::MeasureDiameter,
+                ActiveTool::MeasurePerimeter,
                 ActiveTool::MeasureCount,
-                ActiveTool::CutoutPoly,
-                ActiveTool::ViewportRegion,
             ] {
                 if icon_button(
                     ui,
@@ -195,6 +287,24 @@ pub fn draw_main_toolbar(
                     actions.push(UiAction::SetTool(tool));
                 }
             }
+            tool_dropdown_group(
+                ui,
+                "tb_more_measure",
+                "Más mediciones (Polilongitud, Volumen, Ángulo, Radio, Diámetro, Recorte, Viewport)",
+                &[
+                    ActiveTool::MeasurePolylength,
+                    ActiveTool::MeasureVolume,
+                    ActiveTool::MeasureAngle,
+                    ActiveTool::MeasureRadius,
+                    ActiveTool::MeasureDiameter,
+                    ActiveTool::CutoutPoly,
+                    ActiveTool::ViewportRegion,
+                ],
+                active_tool,
+                has_doc,
+                theme,
+                actions,
+            );
         });
     });
 }
@@ -382,6 +492,9 @@ pub fn draw_dynamic_properties_bar(
                             .selectable_value(&mut style.end_end, le, le.label())
                             .changed()
                         {
+                            if first_kind == ActiveTool::MeasureLength {
+                                style.start_end = le;
+                            }
                             style_dirty = true;
                         }
                     }

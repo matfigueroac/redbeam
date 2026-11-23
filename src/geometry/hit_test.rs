@@ -1,5 +1,5 @@
 use crate::geometry::math::{
-    Point2, Rect2, dist_point_to_segment, point_in_polygon_with_cutouts,
+    Point2, Rect2, dimension_offset_segment, dist_point_to_segment, point_in_polygon_with_cutouts,
 };
 use crate::model::markup::{Markup, MarkupKind};
 
@@ -82,8 +82,16 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
         }
         MarkupKind::Line { start, end }
         | MarkupKind::Arrow { start, end }
-        | MarkupKind::MeasureLength { start, end, .. }
         | MarkupKind::MeasureDiameter { p1: start, p2: end, .. } => Rect2::from_min_max(*start, *end),
+        MarkupKind::MeasureLength {
+            start,
+            end,
+            offset_pt,
+            ..
+        } => {
+            let (da, db, _) = dimension_offset_segment(*start, *end, *offset_pt);
+            Rect2::from_points(&[*start, *end, da, db]).unwrap_or_default()
+        }
         MarkupKind::Arc { start, mid, end } => {
             Rect2::from_points(&[*start, *mid, *end]).unwrap_or_default()
         }
@@ -143,9 +151,22 @@ pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
         }
         MarkupKind::Line { start, end }
         | MarkupKind::Arrow { start, end }
-        | MarkupKind::MeasureLength { start, end, .. }
         | MarkupKind::MeasureDiameter { p1: start, p2: end, .. } => {
             dist_point_to_segment(pt, *start, *end) <= tol_pt
+        }
+        MarkupKind::MeasureLength {
+            start,
+            end,
+            offset_pt,
+            ..
+        } => {
+            let (da, db, _) = dimension_offset_segment(*start, *end, *offset_pt);
+            let pill_mid = da.midpoint(db);
+            dist_point_to_segment(pt, da, db) <= tol_pt
+                || dist_point_to_segment(pt, *start, da) <= tol_pt
+                || dist_point_to_segment(pt, *end, db) <= tol_pt
+                || dist_point_to_segment(pt, *start, *end) <= tol_pt
+                || pt.dist(pill_mid) <= (tol_pt * 2.5).max(16.0)
         }
         MarkupKind::Polyline { points } | MarkupKind::MeasurePolylength { points, .. } => {
             points.windows(2).any(|w| dist_point_to_segment(pt, w[0], w[1]) <= tol_pt)
@@ -302,11 +323,13 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
         } => {
             out.push((HandleKind::LineStart, *start));
             out.push((HandleKind::LineEnd, *end));
-            let mid = start.midpoint(*end);
-            let d = *end - *start;
-            let len = d.len().max(1e-6);
-            let n = Point2::new(-d.y / len, d.x / len);
-            out.push((HandleKind::MeasureOffset, mid + n * *offset_pt));
+            let (da, db, _) = dimension_offset_segment(*start, *end, *offset_pt);
+            // Place the offset handle at 25% along the dimension line so it never obscures the centered caption pill
+            let handle_pt = Point2::new(
+                da.x + (db.x - da.x) * 0.25,
+                da.y + (db.y - da.y) * 0.25,
+            );
+            out.push((HandleKind::MeasureOffset, handle_pt));
         }
         MarkupKind::Arc { start, mid, end } => {
             out.push((HandleKind::LineStart, *start));
@@ -360,6 +383,27 @@ pub fn hit_test_handle(m: &Markup, pt: Point2, tol_pt: f64) -> Option<HandleKind
         }
     }
     None
+}
+
+/// Returns true when `pt` hits the visible dimension line or caption of a `MeasureLength`
+/// (away from its endpoint handles), so dragging adjusts `offset_pt` while keeping measured points fixed.
+pub fn is_measure_length_offset_drag_hit(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
+    let MarkupKind::MeasureLength {
+        start,
+        end,
+        offset_pt,
+        ..
+    } = &m.kind
+    else {
+        return false;
+    };
+    if pt.dist(*start) <= tol_pt * 1.2 || pt.dist(*end) <= tol_pt * 1.2 {
+        return false;
+    }
+    let (da, db, _) = dimension_offset_segment(*start, *end, *offset_pt);
+    let pill_mid = da.midpoint(db);
+    dist_point_to_segment(pt, da, db) <= tol_pt * 1.25
+        || pt.dist(pill_mid) <= (tol_pt * 2.5).max(16.0)
 }
 
 pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
@@ -653,5 +697,36 @@ mod tests {
         } else {
             panic!("wrong kind");
         }
+    }
+
+    #[test]
+    fn measure_length_offset_hit_and_bounds_work() {
+        use crate::model::markup::MeasurementOptions;
+        let m = Markup::new(
+            0,
+            "Longitud",
+            "Autor",
+            MarkupStyle::default(),
+            MarkupKind::MeasureLength {
+                start: Point2::new(100.0, 100.0),
+                end: Point2::new(100.0, 300.0),
+                offset_pt: 25.0,
+                opts: MeasurementOptions::default(),
+            },
+        );
+        // Offset dimension line is at x = 75.0 (left normal of (0, 200) is (-1, 0))
+        let b = markup_bounds(&m);
+        assert!(b.min_x <= 75.1 && b.max_x >= 99.9);
+        assert!(hit_test_markup(&m, Point2::new(75.0, 200.0), 5.0));
+        assert!(is_measure_length_offset_drag_hit(
+            &m,
+            Point2::new(75.0, 200.0),
+            5.0
+        ));
+        assert!(!is_measure_length_offset_drag_hit(
+            &m,
+            Point2::new(100.0, 100.0),
+            5.0
+        ));
     }
 }

@@ -52,6 +52,78 @@ pub enum ActiveTool {
 }
 
 impl ActiveTool {
+    pub fn name_es(self) -> &'static str {
+        match self {
+            Self::Select => "Seleccionar",
+            Self::Pan => "Desplazar / Mano",
+            Self::ZoomWindow => "Zoom ventana",
+            Self::Note => "Nota",
+            Self::TextBox => "Cuadro de texto",
+            Self::Typewriter => "Máquina de escribir",
+            Self::Callout => "Llamada con texto",
+            Self::Cloud => "Nube de revisión",
+            Self::CloudPlus => "Nube+ con comentario",
+            Self::Line => "Línea",
+            Self::Arrow => "Flecha",
+            Self::Polyline => "Polilínea",
+            Self::Arc => "Arco",
+            Self::Rectangle => "Rectángulo",
+            Self::Ellipse => "Elipse / Círculo",
+            Self::Polygon => "Polígono",
+            Self::Ink => "Lápiz / Mano alzada",
+            Self::Highlight => "Resaltador",
+            Self::Stamp => "Sello",
+            Self::Image => "Imagen",
+            Self::Snapshot => "Instantánea",
+            Self::Legend => "Leyenda de mediciones",
+            Self::Calibrate => "Calibrar escala (2 pts)",
+            Self::MeasureLength => "Cota / Longitud",
+            Self::MeasurePolylength => "Polilongitud",
+            Self::MeasurePerimeter => "Perímetro",
+            Self::MeasureArea => "Área",
+            Self::MeasureVolume => "Volumen",
+            Self::MeasureAngle => "Ángulo",
+            Self::MeasureRadius => "Radio",
+            Self::MeasureDiameter => "Diámetro",
+            Self::MeasureCount => "Conteo",
+            Self::CutoutPoly => "Recorte / Descuento área",
+            Self::SketchRect => "Rectángulo a escala",
+            Self::SketchPoly => "Polígono a escala",
+            Self::ViewportRegion => "Crear Viewport de escala",
+        }
+    }
+
+    pub fn shortcut_hint(self) -> Option<&'static str> {
+        match self {
+            Self::Select => Some("V"),
+            Self::ZoomWindow => Some("Z"),
+            Self::Note => Some("N"),
+            Self::TextBox => Some("T"),
+            Self::Typewriter => Some("W"),
+            Self::Callout => Some("Q"),
+            Self::Cloud => Some("C"),
+            Self::CloudPlus => Some("K"),
+            Self::Line => Some("L"),
+            Self::Arrow => Some("A"),
+            Self::Polyline => Some("Shift+N"),
+            Self::Arc => Some("Shift+C"),
+            Self::Rectangle => Some("R"),
+            Self::Ellipse => Some("E"),
+            Self::Polygon => Some("P"),
+            Self::Highlight => Some("H"),
+            Self::Stamp => Some("S"),
+            Self::Image => Some("I"),
+            Self::MeasureLength => Some("Shift+L"),
+            Self::MeasurePerimeter => Some("Shift+P"),
+            Self::MeasureArea => Some("Shift+A"),
+            Self::MeasureVolume => Some("Shift+V"),
+            Self::MeasureAngle => Some("Shift+G"),
+            Self::MeasureRadius => Some("Shift+U"),
+            Self::MeasureCount => Some("Shift+O"),
+            _ => None,
+        }
+    }
+
     pub fn label_es(self) -> &'static str {
         match self {
             Self::Select => "Seleccionar (V)",

@@ -15,39 +15,35 @@ pub fn draw_tool_chest_panel(
 ) -> bool {
     let mut compact_toggled = false;
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let search_w = (ui.available_width() - 56.0).max(80.0);
         ui.add(
-            egui::Label::new(RichText::new("Caja de herramientas").strong().size(12.5)).truncate(),
+            egui::TextEdit::singleline(search)
+                .hint_text("Buscar símbolo...")
+                .desired_width(search_w),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("↺")
-                .on_hover_text("Restaurar conjuntos predeterminados de RedBIM")
-                .clicked()
-            {
-                *chest = ToolChest::default_chilean_sets();
-                chest.save();
-            }
-            let lbl = if *compact { "⊞" } else { "⊟" };
-            if ui
-                .small_button(lbl)
-                .on_hover_text(if *compact {
-                    "Cambiar a vista normal de símbolos"
-                } else {
-                    "Cambiar a vista compacta de símbolos"
-                })
-                .clicked()
-            {
-                *compact = !*compact;
-                compact_toggled = true;
-            }
-        });
+        let lbl = if *compact { "⊞" } else { "⊟" };
+        if ui
+            .small_button(lbl)
+            .on_hover_text(if *compact {
+                "Cambiar a vista normal de símbolos"
+            } else {
+                "Cambiar a vista compacta de símbolos"
+            })
+            .clicked()
+        {
+            *compact = !*compact;
+            compact_toggled = true;
+        }
+        if ui
+            .small_button("↺")
+            .on_hover_text("Restaurar conjuntos predeterminados de RedBIM")
+            .clicked()
+        {
+            *chest = ToolChest::default_chilean_sets();
+            chest.save();
+        }
     });
-
-    ui.add(
-        egui::TextEdit::singleline(search)
-            .hint_text("Buscar herramienta o símbolo...")
-            .desired_width(f32::INFINITY),
-    );
     ui.add_space(4.0);
 
     let q = search.trim().to_lowercase();
@@ -134,6 +130,8 @@ pub fn draw_tool_chest_panel(
                                 };
                                 let border = if is_active {
                                     Stroke::new(1.5, theme.accent_red)
+                                } else if resp.hovered() {
+                                    Stroke::new(1.2, theme.border_strong)
                                 } else {
                                     Stroke::new(1.0, theme.border)
                                 };
@@ -169,22 +167,16 @@ pub fn draw_tool_chest_panel(
                                 }
                             }
 
-                            let tip = if is_my && *real_idx < 9 {
-                                format!(
-                                    "{} (Atajo {})\n{}\nClic derecho: Modo Dibujo / Propiedades",
-                                    item.name,
-                                    real_idx + 1,
-                                    item.tool.label_es()
-                                )
+                            let quick_key = if is_my && *real_idx < 9 {
+                                Some(real_idx + 1)
                             } else {
-                                format!(
-                                    "{}\n{}\nClic derecho: Modo Dibujo / Propiedades",
-                                    item.name,
-                                    item.tool.label_es()
-                                )
+                                None
                             };
-
-                            let resp = resp.on_hover_text(tip);
+                            let resp = resp
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_ui(|ui| {
+                                    draw_tool_hover_card(ui, item, quick_key, theme);
+                                });
                             if resp.clicked() {
                                 actions.push(UiAction::ActivateToolChestItem(item.clone()));
                             }
@@ -230,6 +222,115 @@ pub fn draw_tool_chest_panel(
     if changed {
         chest.save();
     }
-    let _ = Color32::TRANSPARENT;
     compact_toggled
+}
+
+fn draw_tool_hover_card(
+    ui: &mut egui::Ui,
+    item: &ToolChestItem,
+    quick_key: Option<usize>,
+    theme: &RedBimTheme,
+) {
+    ui.set_min_width(220.0);
+    ui.set_max_width(290.0);
+
+    let [r, g, b, _] = item.style.stroke_color;
+    let swatch_col = Color32::from_rgb(r, g, b);
+
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+
+        // Header: color dot + tool name + optional quick keycap (1..9)
+        ui.horizontal(|ui| {
+            let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            ui.painter().circle_filled(dot_rect.center(), 4.5, swatch_col);
+            ui.label(
+                RichText::new(&item.name)
+                    .strong()
+                    .size(13.0)
+                    .color(theme.text_primary),
+            );
+            if let Some(key) = quick_key {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    draw_keycap_pill(ui, &format!("Tecla {key}"), theme);
+                });
+            }
+        });
+
+        // Base tool type + tool shortcut keycap
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(item.tool.name_es())
+                    .size(11.5)
+                    .color(theme.text_secondary),
+            );
+            if let Some(sc) = item.tool.shortcut_hint() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    draw_keycap_pill(ui, sc, theme);
+                });
+            }
+        });
+
+        // Subject / default text if informative
+        if !item.subject.is_empty() && item.subject != item.name {
+            ui.label(
+                RichText::new(format!("Asunto: {}", item.subject))
+                    .size(11.0)
+                    .color(theme.text_muted),
+            );
+        }
+        if !item.default_text.is_empty() {
+            ui.label(
+                RichText::new(format!("Texto: \"{}\"", item.default_text))
+                    .size(11.0)
+                    .color(theme.text_muted),
+            );
+        }
+
+        // Mode & stroke metadata pills
+        ui.horizontal(|ui| {
+            let (mode_lbl, mode_col) = if item.properties_mode {
+                ("Modo Propiedades", theme.accent_cyan)
+            } else {
+                ("Modo Dibujo", theme.accent_amber)
+            };
+            egui::Frame::NONE
+                .fill(mode_col.gamma_multiply(0.16))
+                .stroke(Stroke::new(0.8, mode_col.gamma_multiply(0.55)))
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(mode_lbl).size(10.0).strong().color(mode_col));
+                });
+
+            ui.label(
+                RichText::new(format!("Trazo {:.1} pt", item.style.line_width))
+                    .size(10.5)
+                    .color(theme.text_muted),
+            );
+        });
+
+        ui.separator();
+        ui.label(
+            RichText::new("Clic: activar  •  Clic derecho: modo / quitar")
+                .size(10.0)
+                .color(theme.text_muted),
+        );
+    });
+}
+
+fn draw_keycap_pill(ui: &mut egui::Ui, text: &str, theme: &RedBimTheme) {
+    egui::Frame::NONE
+        .fill(theme.control_bg)
+        .stroke(Stroke::new(0.8, theme.border_strong))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(text)
+                    .size(10.0)
+                    .monospace()
+                    .color(theme.text_secondary),
+            );
+        });
 }

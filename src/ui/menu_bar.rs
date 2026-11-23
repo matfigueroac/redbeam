@@ -6,10 +6,12 @@ use crate::ui::actions::{DialogRequest, UiAction};
 use crate::ui::theme::RedBimTheme;
 use eframe::egui::{self, RichText};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelVisibility {
     pub left_open: bool,
     pub right_open: bool,
     pub bottom_open: bool,
+    pub dpt_open: bool,
 }
 
 pub fn draw_menu_bar(
@@ -271,9 +273,10 @@ pub fn draw_menu_bar(
             ui.checkbox(&mut settings.snap.snap_to_markup, "Snap a marcas");
             ui.checkbox(&mut settings.snap.snap_to_grid, "Snap a grilla");
             ui.separator();
-            ui.checkbox(&mut panels.left_open, "Panel izquierdo (Herramientas)");
-            ui.checkbox(&mut panels.right_open, "Panel derecho (Propiedades / Medición)");
-            ui.checkbox(&mut panels.bottom_open, "Panel inferior (Lista de marcas)");
+            ui.checkbox(&mut panels.left_open, "Panel izquierdo — Herramientas  (F9)");
+            ui.checkbox(&mut panels.right_open, "Panel derecho — Propiedades / Medición  (F10)");
+            ui.checkbox(&mut panels.bottom_open, "Panel inferior — Lista de marcas  (F8)");
+            ui.checkbox(&mut panels.dpt_open, "Barra rápida de propiedades superior");
             ui.separator();
             let next_mode = if settings.theme == ThemeMode::Dark {
                 ThemeMode::Light

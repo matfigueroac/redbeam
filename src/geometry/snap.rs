@@ -129,6 +129,34 @@ impl SnapIndex {
         }
         best.map(|(_, r)| r)
     }
+
+    /// Queries the nearest corner/endpoint (`Endpoint` or `Center`) within `radius_pt`,
+    /// falling back to `query_nearest` (e.g. `Midpoint`) only if no endpoint is found.
+    pub fn query_nearest_corner(&self, target: Point2, radius_pt: f64) -> Option<SnapResult> {
+        let c = self.cell_of(target);
+        let reach = ((radius_pt / self.cell_size).ceil() as i32).clamp(1, 4);
+        let max_sq = radius_pt * radius_pt;
+        let mut best_ep: Option<(f64, SnapResult)> = None;
+
+        for dx in -reach..=reach {
+            for dy in -reach..=reach {
+                if let Some(bucket) = self.points.get(&(c.0 + dx, c.1 + dy)) {
+                    for &(pt, kind) in bucket {
+                        if !matches!(kind, SnapKind::Endpoint | SnapKind::Center) {
+                            continue;
+                        }
+                        let d2 = pt.dist_sq(target);
+                        if d2 <= max_sq
+                            && best_ep.as_ref().is_none_or(|(b_d2, _)| d2 < *b_d2)
+                        {
+                            best_ep = Some((d2, SnapResult { point: pt, kind }));
+                        }
+                    }
+                }
+            }
+        }
+        best_ep.map(|(_, r)| r).or_else(|| self.query_nearest(target, radius_pt))
+    }
 }
 
 pub fn find_best_snap(
@@ -140,12 +168,35 @@ pub fn find_best_snap(
     page_index: usize,
     grid_step_pt: f64,
 ) -> Option<SnapResult> {
+    find_best_snap_excluding(
+        cursor_pt,
+        tolerance_pt,
+        settings,
+        pdf_index,
+        markups,
+        page_index,
+        grid_step_pt,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn find_best_snap_excluding(
+    cursor_pt: Point2,
+    tolerance_pt: f64,
+    settings: &SnapSettings,
+    pdf_index: Option<&SnapIndex>,
+    markups: &[Markup],
+    page_index: usize,
+    grid_step_pt: f64,
+    exclude_markup_id: Option<uuid::Uuid>,
+) -> Option<SnapResult> {
     let mut best: Option<(f64, SnapResult)> = None;
     let tol_sq = tolerance_pt * tolerance_pt;
 
     if settings.snap_to_markup {
         for m in markups {
-            if m.page_index != page_index {
+            if m.page_index != page_index || exclude_markup_id == Some(m.id) {
                 continue;
             }
             for pt in markup_snap_points(m) {
@@ -253,6 +304,102 @@ pub fn apply_ortho_constraint(origin: Point2, target: Point2, active: bool) -> P
     Point2::new(origin.x + len * snapped.cos(), origin.y + len * snapped.sin())
 }
 
+/// Soft magnetic alignment to exact horizontal (0°/180°) or vertical (90°/270°)
+/// whenever the angle from `origin` to `target` is within `threshold_deg` degrees.
+pub fn apply_soft_hv_snap(origin: Point2, target: Point2, threshold_deg: f64) -> (Point2, bool) {
+    let delta = target - origin;
+    let len = delta.len();
+    if len < 2.0 {
+        return (target, false);
+    }
+    let thresh_rad = threshold_deg.to_radians();
+    let dx = delta.x.abs();
+    let dy = delta.y.abs();
+    if dy.atan2(dx) <= thresh_rad {
+        return (Point2::new(target.x, origin.y), true);
+    }
+    if dx.atan2(dy) <= thresh_rad {
+        return (Point2::new(origin.x, target.y), true);
+    }
+    (target, false)
+}
+
+/// Automatically snaps the measured/anchor points of `m` to the nearest PDF vector corners/endpoints
+/// within `max_radius_pt`. Returns the number of points adjusted.
+pub fn snap_markup_points_to_index(m: &mut Markup, index: &SnapIndex, max_radius_pt: f64) -> usize {
+    let mut snapped = 0usize;
+    let mut snap_pt = |pt: &mut Point2| {
+        if let Some(hit) = index.query_nearest_corner(*pt, max_radius_pt)
+            && hit.point.dist_sq(*pt) > 1e-6
+        {
+            *pt = hit.point;
+            snapped += 1;
+        }
+    };
+
+    match &mut m.kind {
+        MarkupKind::Line { start, end }
+        | MarkupKind::Arrow { start, end }
+        | MarkupKind::MeasureLength { start, end, .. }
+        | MarkupKind::MeasureDiameter {
+            p1: start,
+            p2: end,
+            ..
+        } => {
+            snap_pt(start);
+            snap_pt(end);
+        }
+        MarkupKind::Arc { start, mid, end } => {
+            snap_pt(start);
+            snap_pt(mid);
+            snap_pt(end);
+        }
+        MarkupKind::Polyline { points }
+        | MarkupKind::Polygon { points }
+        | MarkupKind::Cloud { points, .. }
+        | MarkupKind::MeasurePolylength { points, .. }
+        | MarkupKind::MeasurePerimeter { points, .. }
+        | MarkupKind::MeasureCount { points, .. }
+        | MarkupKind::SketchPoly { points, .. } => {
+            for p in points {
+                snap_pt(p);
+            }
+        }
+        MarkupKind::MeasureArea {
+            points, cutouts, ..
+        }
+        | MarkupKind::MeasureVolume {
+            points, cutouts, ..
+        } => {
+            for p in points {
+                snap_pt(p);
+            }
+            for c in cutouts {
+                for p in c {
+                    snap_pt(p);
+                }
+            }
+        }
+        MarkupKind::MeasureAngle { p1, vertex, p2, .. } => {
+            snap_pt(p1);
+            snap_pt(vertex);
+            snap_pt(p2);
+        }
+        MarkupKind::MeasureRadius { center, edge, .. } => {
+            snap_pt(center);
+            snap_pt(edge);
+        }
+        MarkupKind::Callout { arrow_tip, .. } => {
+            snap_pt(arrow_tip);
+        }
+        _ => {}
+    }
+    if snapped > 0 {
+        m.modified_at = chrono::Utc::now();
+    }
+    snapped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +422,33 @@ mod tests {
         let p = apply_ortho_constraint(Point2::new(0.0, 0.0), Point2::new(100.0, 8.0), true);
         assert!((p.y).abs() < 1e-6);
         assert!(p.x > 99.0);
+    }
+
+    #[test]
+    fn snap_markup_points_reanchors_cota_to_corners() {
+        use crate::model::markup::{MarkupStyle, MeasurementOptions};
+        let mut idx = SnapIndex::new(16.0);
+        idx.insert_segment(Point2::new(100.0, 100.0), Point2::new(100.0, 300.0));
+
+        let mut m = Markup::new(
+            0,
+            "Longitud",
+            "Autor",
+            MarkupStyle::default(),
+            MarkupKind::MeasureLength {
+                start: Point2::new(104.0, 103.0),
+                end: Point2::new(103.0, 296.0),
+                offset_pt: 20.0,
+                opts: MeasurementOptions::default(),
+            },
+        );
+        let count = snap_markup_points_to_index(&mut m, &idx, 12.0);
+        assert_eq!(count, 2);
+        if let MarkupKind::MeasureLength { start, end, .. } = m.kind {
+            assert_eq!(start, Point2::new(100.0, 100.0));
+            assert_eq!(end, Point2::new(100.0, 300.0));
+        } else {
+            panic!("wrong kind");
+        }
     }
 }

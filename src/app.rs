@@ -1,6 +1,6 @@
 use crate::geometry::hit_test::translate_markup;
 use crate::geometry::math::Point2;
-use crate::geometry::snap::SnapIndex;
+use crate::geometry::snap::{SnapIndex, snap_markup_points_to_index};
 use crate::model::document::{DocumentTab, SplitViewMode};
 use crate::model::markup::{Markup, MarkupKind, MarkupStyle, MeasurementOptions};
 use crate::model::settings::{AppSettings, ThemeMode};
@@ -118,6 +118,13 @@ impl RedBimApp {
             ctx_clone.request_repaint();
         });
 
+        let panels = PanelVisibility {
+            left_open: settings.panel_left_open,
+            right_open: settings.panel_right_open,
+            bottom_open: settings.panel_bottom_open,
+            dpt_open: settings.panel_dpt_open,
+        };
+
         let mut app = Self {
             settings,
             theme,
@@ -128,11 +135,7 @@ impl RedBimApp {
             active_chest_item: None,
             default_style: MarkupStyle::default(),
             default_meas_opts: MeasurementOptions::default(),
-            panels: PanelVisibility {
-                left_open: true,
-                right_open: true,
-                bottom_open: true,
-            },
+            panels,
             left_tab: LeftPanelTab::ToolChest,
             right_tab: if launch.open_measurements_tab {
                 RightPanelTab::Measurements
@@ -435,6 +438,12 @@ impl RedBimApp {
                         actions.push(UiAction::GoToPage(p - 1));
                     }
                 }
+            } else if i.key_pressed(egui::Key::F8) {
+                self.panels.bottom_open = !self.panels.bottom_open;
+            } else if i.key_pressed(egui::Key::F9) {
+                self.panels.left_open = !self.panels.left_open;
+            } else if i.key_pressed(egui::Key::F10) {
+                self.panels.right_open = !self.panels.right_open;
             } else if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 actions.push(UiAction::DeleteSelected);
             } else if !ctrl && !shift {
@@ -835,6 +844,66 @@ impl RedBimApp {
                 UiAction::SendToBack => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         tab.send_selected_to_back();
+                    }
+                }
+                UiAction::SnapSelectedToContent => {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let page_idx = tab.camera.page_index;
+                        let radius_pt = (20.0 / tab.camera.zoom.max(0.1)).clamp(8.0, 40.0);
+                        if let Some(snap_idx) = self.snap_indices.get(&(tab.id, page_idx)) {
+                            let sel = tab.selected_ids.clone();
+                            let mut total_snapped = 0usize;
+                            let mut any_snap = false;
+                            for m in &tab.markups {
+                                if sel.contains(&m.id) && !m.locked {
+                                    let mut clone = m.clone();
+                                    let count = snap_markup_points_to_index(&mut clone, snap_idx, radius_pt);
+                                    if count > 0 {
+                                        any_snap = true;
+                                        total_snapped += count;
+                                    }
+                                }
+                            }
+                            if any_snap {
+                                tab.push_undo();
+                                for m in &mut tab.markups {
+                                    if sel.contains(&m.id) && !m.locked {
+                                        snap_markup_points_to_index(m, snap_idx, radius_pt);
+                                    }
+                                }
+                                self.show_toast(format!(
+                                    "{total_snapped} punto(s) ajustado(s) a esquinas del plano"
+                                ));
+                            } else {
+                                self.show_toast("No hay esquinas cercanas dentro del rango");
+                            }
+                        } else {
+                            self.show_toast("Sin índice vectorial en esta página");
+                        }
+                    }
+                }
+                UiAction::ToggleLockSelected => {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let sel = tab.selected_ids.clone();
+                        if !sel.is_empty() {
+                            tab.push_undo();
+                            let any_unlocked = tab
+                                .markups
+                                .iter()
+                                .any(|m| sel.contains(&m.id) && !m.locked);
+                            let new_lock = any_unlocked;
+                            for m in &mut tab.markups {
+                                if sel.contains(&m.id) {
+                                    m.locked = new_lock;
+                                    m.modified_at = chrono::Utc::now();
+                                }
+                            }
+                            self.show_toast(if new_lock {
+                                "Puntos fijados (marca bloqueada)"
+                            } else {
+                                "Marca desbloqueada"
+                            });
+                        }
                     }
                 }
                 UiAction::SetTool(tool) => {
@@ -1421,21 +1490,40 @@ impl eframe::App for RedBimApp {
                 draw_main_toolbar(ui, tab_ref, self.active_tool, &self.theme, &mut actions);
             });
 
-        // Dynamic Properties Toolbar
-        egui::Panel::top("redbim_dpt_toolbar")
-            .frame(egui::Frame::new().fill(self.theme.panel_bg).inner_margin(egui::Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, self.theme.border)))
-            .show(ui, |ui| {
-                let tab_mut = self.tabs.get_mut(self.active_tab);
-                draw_dynamic_properties_bar(
-                    ui,
-                    tab_mut,
-                    self.active_tool,
-                    &mut self.default_style,
-                    &mut self.default_meas_opts,
-                    &self.theme,
-                    &mut actions,
-                );
-            });
+        // Dynamic Properties Toolbar (collapsible to reduce top clutter)
+        if self.panels.dpt_open {
+            egui::Panel::top("redbim_dpt_toolbar")
+                .frame(egui::Frame::new().fill(self.theme.panel_bg).inner_margin(egui::Margin::symmetric(8, 3)).stroke(Stroke::new(1.0, self.theme.border)))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let tab_mut = self.tabs.get_mut(self.active_tab);
+                        draw_dynamic_properties_bar(
+                            ui,
+                            tab_mut,
+                            self.active_tool,
+                            &mut self.default_style,
+                            &mut self.default_meas_opts,
+                            &self.theme,
+                            &mut actions,
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("▲").size(10.0).color(self.theme.text_muted),
+                                    )
+                                    .frame(false)
+                                    .min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .on_hover_text("Ocultar barra rápida superior (Vista -> Barra rápida)")
+                                .clicked()
+                            {
+                                self.panels.dpt_open = false;
+                            }
+                        });
+                    });
+                });
+        }
 
         // Sleek Modern Document Tabs Strip
         if !self.tabs.is_empty() {
@@ -1556,11 +1644,84 @@ impl eframe::App for RedBimApp {
                 );
             });
 
+        // Left Activity Rail (always visible — 1-click open/close for Left Panel)
+        egui::Panel::left("redbim_left_rail")
+            .resizable(false)
+            .exact_size(38.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(self.theme.window_bg)
+                    .inner_margin(egui::Margin::symmetric(4, 6))
+                    .stroke(Stroke::new(1.0, self.theme.border)),
+            )
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for (kind, icon, tip) in [
+                        (
+                            LeftPanelTab::ToolChest,
+                            IconKind::ToolChest,
+                            "Caja de herramientas (clic de nuevo para ocultar)",
+                        ),
+                        (
+                            LeftPanelTab::Thumbnails,
+                            IconKind::Thumbnails,
+                            "Miniaturas de páginas (clic de nuevo para ocultar)",
+                        ),
+                        (
+                            LeftPanelTab::Layers,
+                            IconKind::Layers,
+                            "Capas (clic de nuevo para ocultar)",
+                        ),
+                        (
+                            LeftPanelTab::Bookmarks,
+                            IconKind::Bookmarks,
+                            "Marcadores (clic de nuevo para ocultar)",
+                        ),
+                    ] {
+                        let is_active = self.panels.left_open && self.left_tab == kind;
+                        if icon_button(ui, 28.0, icon, is_active, true, tip, &self.theme).clicked()
+                        {
+                            if is_active {
+                                self.panels.left_open = false;
+                            } else {
+                                self.left_tab = kind;
+                                self.panels.left_open = true;
+                            }
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                        let arrow = if self.panels.left_open { "«" } else { "»" };
+                        let tip = if self.panels.left_open {
+                            "Cerrar panel izquierdo (F9)"
+                        } else {
+                            "Abrir panel izquierdo (F9)"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(arrow)
+                                        .size(14.0)
+                                        .color(self.theme.text_secondary),
+                                )
+                                .frame(false)
+                                .min_size(egui::vec2(28.0, 26.0)),
+                            )
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.panels.left_open = !self.panels.left_open;
+                        }
+                    });
+                });
+            });
+
         // Left Panel (Tool Chest, Thumbnails, Layers, Bookmarks)
         if self.panels.left_open {
             egui::Panel::left("redbim_left_panel")
                 .resizable(true)
-                .default_size(250.0)
+                .default_size(235.0)
                 .size_range(190.0..=420.0)
                 .frame(egui::Frame::new().fill(self.theme.panel_bg).inner_margin(egui::Margin::same(8)).stroke(Stroke::new(1.0, self.theme.border)))
                 .show(ui, |ui| {
@@ -1568,6 +1729,7 @@ impl eframe::App for RedBimApp {
                     draw_left_panel(
                         ui,
                         &mut self.left_tab,
+                        &mut self.panels.left_open,
                         tab_mut,
                         &mut self.tool_chest,
                         &mut self.chest_search,
@@ -1581,54 +1743,111 @@ impl eframe::App for RedBimApp {
                 });
         }
 
+        // Right Activity Rail (always visible — 1-click open/close for Right Panel)
+        egui::Panel::right("redbim_right_rail")
+            .resizable(false)
+            .exact_size(38.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(self.theme.window_bg)
+                    .inner_margin(egui::Margin::symmetric(4, 6))
+                    .stroke(Stroke::new(1.0, self.theme.border)),
+            )
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for (kind, icon, tip) in [
+                        (
+                            RightPanelTab::Properties,
+                            IconKind::Properties,
+                            "Propiedades de marca y cotas (clic de nuevo para ocultar)",
+                        ),
+                        (
+                            RightPanelTab::Measurements,
+                            IconKind::Measurements,
+                            "Escala y Mediciones (clic de nuevo para ocultar)",
+                        ),
+                        (
+                            RightPanelTab::Search,
+                            IconKind::Search,
+                            "Buscar en documento y marcas (clic de nuevo para ocultar)",
+                        ),
+                    ] {
+                        let is_active = self.panels.right_open && self.right_tab == kind;
+                        if icon_button(ui, 28.0, icon, is_active, true, tip, &self.theme).clicked()
+                        {
+                            if is_active {
+                                self.panels.right_open = false;
+                            } else {
+                                self.right_tab = kind;
+                                self.panels.right_open = true;
+                            }
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                        let arrow = if self.panels.right_open { "»" } else { "«" };
+                        let tip = if self.panels.right_open {
+                            "Cerrar panel derecho (F10)"
+                        } else {
+                            "Abrir panel derecho (F10)"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(arrow)
+                                        .size(14.0)
+                                        .color(self.theme.text_secondary),
+                                )
+                                .frame(false)
+                                .min_size(egui::vec2(28.0, 26.0)),
+                            )
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.panels.right_open = !self.panels.right_open;
+                        }
+                    });
+                });
+            });
+
         // Right Panel (Properties, Measurements & Scale, Search)
         if self.panels.right_open {
             egui::Panel::right("redbim_right_panel")
                 .resizable(true)
-                .default_size(285.0)
-                .size_range(220.0..=450.0)
+                .default_size(275.0)
+                .size_range(230.0..=450.0)
                 .frame(egui::Frame::new().fill(self.theme.panel_bg).inner_margin(egui::Margin::same(8)).stroke(Stroke::new(1.0, self.theme.border)))
                 .show(ui, |ui| {
+                    let header_title = match self.right_tab {
+                        RightPanelTab::Properties => "Propiedades",
+                        RightPanelTab::Measurements => "Escala y Mediciones",
+                        RightPanelTab::Search => "Buscar",
+                    };
                     ui.horizontal(|ui| {
-                        if icon_button(
-                            ui,
-                            28.0,
-                            IconKind::Properties,
-                            self.right_tab == RightPanelTab::Properties,
-                            true,
-                            "Propiedades de marca",
-                            &self.theme,
-                        )
-                        .clicked()
-                        {
-                            self.right_tab = RightPanelTab::Properties;
-                        }
-                        if icon_button(
-                            ui,
-                            28.0,
-                            IconKind::Measurements,
-                            self.right_tab == RightPanelTab::Measurements,
-                            true,
-                            "Escala y Mediciones (Chile / EE.UU.)",
-                            &self.theme,
-                        )
-                        .clicked()
-                        {
-                            self.right_tab = RightPanelTab::Measurements;
-                        }
-                        if icon_button(
-                            ui,
-                            28.0,
-                            IconKind::Search,
-                            self.right_tab == RightPanelTab::Search,
-                            true,
-                            "Buscar en documento y marcas",
-                            &self.theme,
-                        )
-                        .clicked()
-                        {
-                            self.right_tab = RightPanelTab::Search;
-                        }
+                        ui.label(
+                            RichText::new(header_title)
+                                .strong()
+                                .size(12.5)
+                                .color(self.theme.text_primary),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("»")
+                                            .size(13.0)
+                                            .color(self.theme.text_secondary),
+                                    )
+                                    .frame(false)
+                                    .min_size(egui::vec2(22.0, 22.0)),
+                                )
+                                .on_hover_text("Ocultar panel derecho (F10)")
+                                .clicked()
+                            {
+                                self.panels.right_open = false;
+                            }
+                        });
                     });
                     ui.separator();
 
@@ -1673,7 +1892,7 @@ impl eframe::App for RedBimApp {
         if self.panels.bottom_open && !self.tabs.is_empty() {
             egui::Panel::bottom("redbim_markups_list")
                 .resizable(true)
-                .default_size(175.0)
+                .default_size(170.0)
                 .size_range(100.0..=360.0)
                 .frame(egui::Frame::new().fill(self.theme.panel_bg).inner_margin(egui::Margin::same(8)).stroke(Stroke::new(1.0, self.theme.border)))
                 .show(ui, |ui| {
@@ -1682,6 +1901,7 @@ impl eframe::App for RedBimApp {
                         ui,
                         tab_mut,
                         &mut self.markups_list_state,
+                        &mut self.panels.bottom_open,
                         &self.theme,
                         &mut actions,
                     );
@@ -1802,6 +2022,18 @@ impl eframe::App for RedBimApp {
         }
 
         self.execute_actions(&ctx, actions);
+
+        if self.settings.panel_left_open != self.panels.left_open
+            || self.settings.panel_right_open != self.panels.right_open
+            || self.settings.panel_bottom_open != self.panels.bottom_open
+            || self.settings.panel_dpt_open != self.panels.dpt_open
+        {
+            self.settings.panel_left_open = self.panels.left_open;
+            self.settings.panel_right_open = self.panels.right_open;
+            self.settings.panel_bottom_open = self.panels.bottom_open;
+            self.settings.panel_dpt_open = self.panels.dpt_open;
+            self.settings.save();
+        }
 
         // Optional automated screenshot capture for visual verification (`--screenshot path.png`)
         if let Some(ref out_path) = self.screenshot_out {

@@ -3,7 +3,6 @@ use crate::model::settings::AppSettings;
 use crate::model::tool_chest::ToolChest;
 use crate::model::units::{SheetDisplayUnit, format_page_dimensions};
 use crate::ui::actions::UiAction;
-use crate::ui::icons::{IconKind, icon_button};
 use crate::ui::theme::RedBimTheme;
 use crate::ui::tool_chest_panel::draw_tool_chest_panel;
 use eframe::egui::{self, CornerRadius, RichText, Stroke, TextureHandle};
@@ -19,10 +18,22 @@ pub enum LeftPanelTab {
     Bookmarks,
 }
 
+impl LeftPanelTab {
+    pub fn title_es(self) -> &'static str {
+        match self {
+            Self::ToolChest => "Caja de herramientas",
+            Self::Thumbnails => "Miniaturas",
+            Self::Layers => "Capas",
+            Self::Bookmarks => "Marcadores",
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_left_panel(
     ui: &mut egui::Ui,
     active_tab: &mut LeftPanelTab,
+    left_open: &mut bool,
     tab: Option<&mut DocumentTab>,
     chest: &mut ToolChest,
     chest_search: &mut String,
@@ -34,16 +45,25 @@ pub fn draw_left_panel(
     actions: &mut Vec<UiAction>,
 ) {
     ui.horizontal(|ui| {
-        for (kind, icon, tip) in [
-            (LeftPanelTab::ToolChest, IconKind::ToolChest, "Caja de herramientas"),
-            (LeftPanelTab::Thumbnails, IconKind::Thumbnails, "Miniaturas de páginas"),
-            (LeftPanelTab::Layers, IconKind::Layers, "Capas"),
-            (LeftPanelTab::Bookmarks, IconKind::Bookmarks, "Marcadores"),
-        ] {
-            if icon_button(ui, 28.0, icon, *active_tab == kind, true, tip, theme).clicked() {
-                *active_tab = kind;
+        ui.label(
+            RichText::new(active_tab.title_es())
+                .strong()
+                .size(12.5)
+                .color(theme.text_primary),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("«").size(13.0).color(theme.text_secondary))
+                        .frame(false)
+                        .min_size(egui::vec2(22.0, 22.0)),
+                )
+                .on_hover_text("Ocultar panel izquierdo (F9)")
+                .clicked()
+            {
+                *left_open = false;
             }
-        }
+        });
     });
     ui.separator();
 
