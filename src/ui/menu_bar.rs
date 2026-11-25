@@ -107,14 +107,14 @@ pub fn draw_menu_bar(
                 ui.close();
             }
             if ui
-                .add_enabled(has_doc, egui::Button::new("Exportar marcas (.redbim.json)..."))
+                .add_enabled(has_doc, egui::Button::new("Exportar marcas (.redbeam.json)..."))
                 .clicked()
             {
                 actions.push(UiAction::ExportMarkupsJson);
                 ui.close();
             }
             if ui
-                .add_enabled(has_doc, egui::Button::new("Importar marcas (.redbim.json)..."))
+                .add_enabled(has_doc, egui::Button::new("Importar marcas (.json)..."))
                 .clicked()
             {
                 actions.push(UiAction::ImportMarkupsJson);

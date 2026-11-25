@@ -38,7 +38,20 @@ function Export-Demo([string] $Destination) {
     }
 }
 
-$installArgs = $quiet + @('/SP-', '/NOICONS', "/DIR=`"$installed`"", "/LOG=`"$scratch/setup.log`"")
+$iconsArg = '/NOICONS'
+$oldShortcuts = @()
+$newShortcuts = @()
+if ($PreviousInstaller) {
+    $iconsArg = '/TASKS=desktopicon'
+    $programs = [Environment]::GetFolderPath('Programs')
+    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+    $oldShortcuts = @((Join-Path $programs 'RedBIM/RedBIM.lnk'), (Join-Path $desktop 'RedBIM.lnk'))
+    $newShortcuts = @((Join-Path $programs 'RedBeam/RedBeam.lnk'), (Join-Path $desktop 'RedBeam.lnk'))
+    foreach ($shortcut in $oldShortcuts + $newShortcuts) {
+        if (Test-Path -LiteralPath $shortcut) { throw "Ya existe el acceso directo $shortcut." }
+    }
+}
+$installArgs = $quiet + @('/SP-', $iconsArg, "/DIR=`"$installed`"", "/LOG=`"$scratch/setup.log`"")
 $previousPath = $Installer
 if ($PreviousInstaller) { $previousPath = (Get-Item -LiteralPath $PreviousInstaller).FullName }
 $previousVersion = (Get-Item -LiteralPath $previousPath).VersionInfo.ProductVersion.TrimEnd(' ', [char]0)
@@ -55,11 +68,14 @@ try {
     if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -ne $previousVersion) {
         throw 'Windows no registró la versión esperada en la primera instalación.'
     }
+    foreach ($shortcut in $oldShortcuts) {
+        if (!(Test-Path -LiteralPath $shortcut)) { throw "La instalación anterior no creó $shortcut." }
+    }
     $oldBinaryHash = (Get-FileHash -LiteralPath $app).Hash
     Export-Demo $pdf
     $originalHash = (Get-FileHash -LiteralPath $pdf).Hash
 
-    Start-Checked $Installer ($quiet + @('/SP-', '/NOICONS', "/LOG=`"$scratch/upgrade.log`""))
+    Start-Checked $Installer ($quiet + @('/SP-', $iconsArg, "/LOG=`"$scratch/upgrade.log`""))
     if ((Get-Item -LiteralPath $app).VersionInfo.ProductVersion -ne $version) {
         throw 'La versión instalada no coincide con la del instalador.'
     }
@@ -74,6 +90,12 @@ try {
     }
     if ($PreviousInstaller -and (Get-FileHash -LiteralPath $app).Hash -eq $oldBinaryHash) {
         throw 'La actualización dejó el ejecutable anterior.'
+    }
+    foreach ($shortcut in $oldShortcuts) {
+        if (Test-Path -LiteralPath $shortcut) { throw "La actualización dejó el acceso directo anterior $shortcut." }
+    }
+    foreach ($shortcut in $newShortcuts) {
+        if (!(Test-Path -LiteralPath $shortcut)) { throw "La actualización no creó $shortcut." }
     }
     if ((Get-FileHash -LiteralPath $pdf).Hash -ne $originalHash) { throw 'La actualización modificó el plano de prueba.' }
     foreach ($name in @('libunwind.dll', 'Licencia-RedBeam.txt', 'Licencias-de-terceros.html', 'Licencia-LLVM.txt')) {

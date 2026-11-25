@@ -1,6 +1,6 @@
 [package]
 name = "redbim"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "RedBeam - Visor, marcado y cubicación de planos PDF nativo para Windows (enfoque métrico chileno e imperial)"
 license = "MIT"

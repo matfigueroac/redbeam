@@ -1,6 +1,6 @@
 # Cambios de RedBeam
 
-## 0.2.1
+## 0.2.2
 
 - RedBeam pasa a ser el nombre de la app y del instalador. Las instalaciones existentes conservan sus preferencias y siguen recibiendo actualizaciones.
 

@@ -24,7 +24,7 @@ pub fn draw_tool_chest_panel(
         );
         if ui
             .small_button("📥")
-            .on_hover_text("Importar conjunto de herramientas (.redbim-tools.json)")
+            .on_hover_text("Importar conjunto de herramientas (.json)")
             .clicked()
         {
             actions.push(UiAction::ImportToolSet);
@@ -84,7 +84,7 @@ pub fn draw_tool_chest_panel(
                         }
                         btn.context_menu(|ui| {
                             if ui
-                                .button("Exportar conjunto (.redbim-tools.json)...")
+                                .button("Exportar conjunto (.redbeam-tools.json)...")
                                 .clicked()
                             {
                                 actions.push(UiAction::ExportToolSet(set_id));

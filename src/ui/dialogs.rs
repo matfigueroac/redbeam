@@ -2425,7 +2425,7 @@ fn build_palette_commands(has_doc: bool, theme_mode: ThemeMode) -> Vec<PaletteCo
         },
         PaletteCommand {
             category: "Caja de herramientas",
-            label: "Importar conjunto de herramientas (.redbim-tools.json)...",
+            label: "Importar conjunto de herramientas (.json)...",
             shortcut: "",
             action: UiAction::ImportToolSet,
         },

@@ -3424,7 +3424,7 @@ dependencies = [
 
 [[package]]
 name = "redbim"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "directories",

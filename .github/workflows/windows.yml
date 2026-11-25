@@ -40,7 +40,17 @@ jobs:
           ./installer/Build-Windows.ps1 -Iscc $env:REDBIM_ISCC -CargoAbout $env:REDBIM_CARGO_ABOUT -ExpectedTag $tag
 
       - name: Probar el instalador
-        run: ./installer/Test-Installer.ps1 -Installer ./dist/RedBeam-Setup-x64.exe
+        run: |
+          $test = @{ Installer = './dist/RedBeam-Setup-x64.exe' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $oldInstaller = Join-Path $env:RUNNER_TEMP 'RedBIM-Setup-x64.exe'
+            Invoke-WebRequest -Uri 'https://github.com/matfigueroac/redbeam/releases/download/v0.2.0/RedBIM-Setup-x64.exe' -OutFile $oldInstaller
+            if ((Get-FileHash -LiteralPath $oldInstaller).Hash -ne '60197ECEC54F06712C7DE9AA849C0158F39F342F93F665E409A80E1EA653A5A7') {
+              throw 'El instalador anterior no coincide con su SHA-256.'
+            }
+            $test.PreviousInstaller = $oldInstaller
+          }
+          ./installer/Test-Installer.ps1 @test
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

@@ -62,3 +62,35 @@ Name: "{autodesktop}\RedBeam"; Filename: "{app}\redbim.exe"; WorkingDir: "{app}"
 
 [Run]
 Filename: "{app}\redbim.exe"; Description: "{cm:LaunchProgram,RedBeam}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure RetireReplacedShortcut(const OldPath, NewPath: String);
+var
+  Shell, OldLink, NewLink: Variant;
+  AppPath: String;
+begin
+  if not (FileExists(OldPath) and FileExists(NewPath)) then
+    Exit;
+
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    OldLink := Shell.CreateShortcut(OldPath);
+    NewLink := Shell.CreateShortcut(NewPath);
+    AppPath := ExpandConstant('{app}\redbim.exe');
+    if (CompareText(OldLink.TargetPath, AppPath) = 0) and
+       (CompareText(NewLink.TargetPath, AppPath) = 0) then
+      DeleteFile(OldPath);
+  except
+    Log('Could not verify the old shortcut: ' + OldPath);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    RetireReplacedShortcut(ExpandConstant('{autoprograms}\RedBIM\RedBIM.lnk'),
+      ExpandConstant('{group}\RedBeam.lnk'));
+    RetireReplacedShortcut(ExpandConstant('{autodesktop}\RedBIM.lnk'),
+      ExpandConstant('{autodesktop}\RedBeam.lnk'));
+  end;
+end;
