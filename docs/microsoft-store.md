@@ -20,6 +20,8 @@ Usa la ruta completa en `-MakeAppx` si la herramienta queda fuera de `PATH`. El 
 
 4. Sube el `.msix` en Partner Center. Agrega la descripción y las capturas, completa el cuestionario de clasificación y envía la versión a certificación. [Proceso de publicación](https://learn.microsoft.com/windows/apps/publish/publish-your-app/create-app-submission)
 
+Para cambiar el nombre de una app publicada, reserva el nuevo nombre en **Administrar los nombres de las aplicaciones** del producto existente. Crea una actualización, sube el MSIX con el nuevo nombre y elige el nombre reservado en cada ficha de Store. Así se conserva el enlace de descarga y Microsoft Store entrega la actualización a quienes ya instalaron la app. [Edición de la ficha](https://learn.microsoft.com/windows/apps/publish/publish-your-app/msix/add-and-edit-store-listing-info)
+
 ## Ficha en español
 
 RedBeam es una aplicación de escritorio para revisar, anotar y cubicar planos PDF. Permite calibrar la escala, medir longitudes y áreas, contar elementos y exportar resultados. Incluye un plano de ejemplo para practicar y admite unidades métricas e imperiales.

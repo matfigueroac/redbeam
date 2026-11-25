@@ -2832,7 +2832,7 @@ impl RedBimApp {
                         actions.push(UiAction::NewBlankDocument);
                     }
 
-                    if !self.settings.recent_files.is_empty() {
+                    if self.screenshot_out.is_none() && !self.settings.recent_files.is_empty() {
                         ui.add_space(16.0);
                         ui.separator();
                         ui.label(RichText::new("Archivos recientes").strong().size(12.0));
