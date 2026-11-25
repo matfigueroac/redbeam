@@ -8,9 +8,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 use ureq::tls::{TlsConfig, TlsProvider};
 
-const RELEASES: &str = "https://github.com/matfigueroac/redbim/releases";
-const LATEST_API: &str = "https://api.github.com/repos/matfigueroac/redbim/releases/latest";
-const INSTALLER_NAME: &str = "RedBIM-Setup-x64.exe";
+const RELEASES: &str = "https://github.com/matfigueroac/redbeam/releases";
+const LATEST_API: &str = "https://api.github.com/repos/matfigueroac/redbeam/releases/latest";
+const INSTALLER_NAME: &str = "RedBeam-Setup-x64.exe";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_SIZE: u64 = 64 * 1024 * 1024;
 
@@ -96,7 +96,7 @@ fn agent(seconds: u64, redirects: u32) -> ureq::Agent {
         .timeout_global(Some(Duration::from_secs(seconds)))
         .https_only(true)
         .max_redirects(redirects)
-        .user_agent(concat!("RedBIM/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("RedBeam/", env!("CARGO_PKG_VERSION")))
         .build()
         .new_agent()
 }
@@ -169,6 +169,22 @@ fn mark_download(_: &Path, _: &str) -> Option<()> {
 }
 
 #[cfg(windows)]
+pub(crate) fn is_packaged() -> bool {
+    use windows_sys::Win32::{
+        Foundation::ERROR_INSUFFICIENT_BUFFER, Storage::Packaging::Appx::GetCurrentPackageFullName,
+    };
+
+    let mut length = 0;
+    let result = unsafe { GetCurrentPackageFullName(&mut length, std::ptr::null_mut()) };
+    result == ERROR_INSUFFICIENT_BUFFER
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_packaged() -> bool {
+    false
+}
+
+#[cfg(windows)]
 fn registered_install_dir() -> Option<PathBuf> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
@@ -218,6 +234,9 @@ fn open_installer(_: &Path, _: &Path) -> bool {
 
 impl UpdateCheck {
     pub(crate) fn check_on_startup(&mut self, ctx: &egui::Context) {
+        if is_packaged() {
+            return;
+        }
         self.install_dir = registered_install_dir();
         if self.install_dir.is_some() {
             self.start(ctx, Update::Checking, fetch_update);
@@ -278,7 +297,7 @@ impl UpdateCheck {
         let mut download_request = None;
         let mut install = false;
         let mut close = false;
-        egui::Window::new("Actualizaciones de RedBIM")
+        egui::Window::new("Actualizaciones de RedBeam")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -298,7 +317,7 @@ impl UpdateCheck {
                         });
                     }
                     Update::Available(installer) | Update::DownloadFailed(installer) => {
-                        ui.label(format!("RedBIM {} está disponible.", installer.version));
+                        ui.label(format!("RedBeam {} está disponible.", installer.version));
                         if matches!(self.state, Update::DownloadFailed(_)) {
                             ui.label("La descarga falló o el archivo no pasó la verificación.");
                         }
@@ -314,10 +333,10 @@ impl UpdateCheck {
                     }
                     Update::Ready(installer, _) => {
                         ui.label(format!(
-                            "RedBIM {} está listo para instalar.",
+                            "RedBeam {} está listo para instalar.",
                             installer.version
                         ));
-                        ui.label("Guarda tus planos. Al abrir el instalador se cerrará RedBIM.");
+                        ui.label("Guarda tus planos. Al abrir el instalador se cerrará RedBeam.");
                         install = ui.button("Abrir instalador").clicked();
                     }
                     Update::Current => {
@@ -366,7 +385,7 @@ impl UpdateCheck {
             return Err("Vuelve a descargar el instalador. No pasó la verificación.");
         }
         if !open_installer(path, install_dir) {
-            return Err("No se pudo abrir el instalador de RedBIM.");
+            return Err("No se pudo abrir el instalador de RedBeam.");
         }
         self.visible = false;
         Ok(())

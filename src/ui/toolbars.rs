@@ -13,7 +13,7 @@ use crate::ui::theme::RedBimTheme;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 
 const QUICK_COLORS: &[[u8; 4]] = &[
-    [229, 57, 53, 255],   // RedBIM Red
+    [229, 57, 53, 255],   // RedBeam Red
     [37, 99, 235, 255],   // Engineering Blue
     [22, 163, 74, 255],   // Measurement Green
     [245, 158, 11, 255],  // Contractor Amber

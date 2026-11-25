@@ -1,4 +1,4 @@
-# Funciones de RedBIM
+# Funciones de RedBeam
 
 ## Funcionalidades Implementadas
 

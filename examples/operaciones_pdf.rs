@@ -41,7 +41,7 @@ fn mark(tab: &mut DocumentTab) {
             tab.markups.push(Markup::new(
                 page,
                 "Rendimiento",
-                "RedBIM",
+                "RedBeam",
                 MarkupStyle::default(),
                 MarkupKind::Rectangle {
                     rect: Rect2::from_xywh(
@@ -79,7 +79,7 @@ impl Bench {
                     doc.objects
                         .values()
                         .filter_map(|object| object.as_stream().ok())
-                        .filter(|stream| stream.dict.has(b"RedBIMFlattenedOverlay"))
+                        .filter(|stream| stream.dict.has(b"RedBeamFlattenedOverlay"))
                         .count()
                         == flattened.pages.len()
                 );
@@ -204,7 +204,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RedBIM · Operaciones PDF",
+        "RedBeam · Operaciones PDF",
         options,
         Box::new(move |cc| {
             let mut app = RedBimApp::new(

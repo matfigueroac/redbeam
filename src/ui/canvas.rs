@@ -2491,7 +2491,7 @@ fn handle_canvas_input(
                     let subtitle = tpl
                         .filter(|t| !t.stamp_subtitle.is_empty())
                         .map(|t| t.stamp_subtitle.clone())
-                        .unwrap_or_else(|| "RedBIM Chile".to_string());
+                        .unwrap_or_else(|| "RedBeam Chile".to_string());
                     let subject = tpl
                         .filter(|t| !t.subject.is_empty())
                         .map(|t| t.subject.clone())

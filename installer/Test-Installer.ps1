@@ -10,11 +10,11 @@ $Installer = (Get-Item -LiteralPath $Installer).FullName
 $version = (Get-Item -LiteralPath $Installer).VersionInfo.ProductVersion.TrimEnd(' ', [char]0)
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{C5034EAE-B272-4175-92B5-F6284A1187A1}_is1'
 if (Test-Path -LiteralPath $uninstallKey) {
-    throw 'Ya existe una instalación de RedBIM registrada en este usuario. Usa una cuenta de prueba para este script.'
+    throw 'Ya existe una instalación de RedBeam registrada en este usuario. Usa una cuenta de prueba para este script.'
 }
 $scratch = Join-Path ([IO.Path]::GetFullPath($ScratchDirectory)) "redbim-installer-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $scratch -Force | Out-Null
-$installed = Join-Path $scratch 'RedBIM de prueba'
+$installed = Join-Path $scratch 'RedBeam de prueba'
 $app = Join-Path $installed 'redbim.exe'
 $uninstall = Join-Path $installed 'unins000.exe'
 $pdf = Join-Path $installed 'Plano de prueba.pdf'
@@ -76,7 +76,7 @@ try {
         throw 'La actualización dejó el ejecutable anterior.'
     }
     if ((Get-FileHash -LiteralPath $pdf).Hash -ne $originalHash) { throw 'La actualización modificó el plano de prueba.' }
-    foreach ($name in @('libunwind.dll', 'Licencia-RedBIM.txt', 'Licencias-de-terceros.html', 'Licencia-LLVM.txt')) {
+    foreach ($name in @('libunwind.dll', 'Licencia-RedBeam.txt', 'Licencias-de-terceros.html', 'Licencia-LLVM.txt')) {
         if (!(Test-Path -LiteralPath (Join-Path $installed $name))) { throw "Falta $name en la instalación." }
     }
     $updatedPdf = Join-Path $scratch 'Plano exportado después de actualizar.pdf'
@@ -88,7 +88,7 @@ try {
 }
 
 if ((Test-Path -LiteralPath $app) -or (Test-Path -LiteralPath $uninstallKey)) {
-    throw 'Windows conserva archivos de RedBIM o su entrada de desinstalación.'
+    throw 'Windows conserva archivos de RedBeam o su entrada de desinstalación.'
 }
 if ((Get-FileHash -LiteralPath $pdf).Hash -ne $originalHash) { throw 'La desinstalación modificó el plano de prueba.' }
 Remove-Item -LiteralPath $pdf

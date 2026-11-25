@@ -12,10 +12,10 @@ BEGIN
     BEGIN
         BLOCK "0c0a04b0"
         BEGIN
-            VALUE "FileDescription", "RedBIM"
+            VALUE "FileDescription", "RedBeam"
             VALUE "FileVersion", VERSION_STRING
             VALUE "OriginalFilename", "redbim.exe"
-            VALUE "ProductName", "RedBIM"
+            VALUE "ProductName", "RedBeam"
             VALUE "ProductVersion", VERSION_STRING
         END
     END

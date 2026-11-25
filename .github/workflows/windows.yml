@@ -40,19 +40,19 @@ jobs:
           ./installer/Build-Windows.ps1 -Iscc $env:REDBIM_ISCC -CargoAbout $env:REDBIM_CARGO_ABOUT -ExpectedTag $tag
 
       - name: Probar el instalador
-        run: ./installer/Test-Installer.ps1 -Installer ./dist/RedBIM-Setup-x64.exe
+        run: ./installer/Test-Installer.ps1 -Installer ./dist/RedBeam-Setup-x64.exe
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: redbim-windows-x64
+          name: redbeam-windows-x64
           if-no-files-found: error
           path: |
-            dist/RedBIM-Setup-x64.exe
+            dist/RedBeam-Setup-x64.exe
             dist/SHA256SUMS.txt
             dist/Licencias-de-terceros.html
 
   release:
-    if: github.ref_type == 'tag' && github.repository == 'matfigueroac/redbim'
+    if: github.ref_type == 'tag' && github.repository == 'matfigueroac/redbeam'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: redbim-windows-x64
+          name: redbeam-windows-x64
           path: dist
 
       - name: Publicar versión en GitHub Releases
@@ -70,7 +70,8 @@ jobs:
         run: |
           cd dist
           sha256sum --check SHA256SUMS.txt
-          gh release create "$RELEASE_TAG" RedBIM-Setup-x64.exe SHA256SUMS.txt Licencias-de-terceros.html \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --title "RedBIM $RELEASE_TAG" --latest \
-            --notes 'Descarga **RedBIM-Setup-x64.exe** para instalar en Windows x64. Las copias instaladas recibirán un aviso al abrir RedBIM y podrán descargar la actualización desde la app. Consulta el [historial de cambios](https://github.com/matfigueroac/redbim/blob/main/CHANGELOG.md).' \
+          cp RedBeam-Setup-x64.exe RedBIM-Setup-x64.exe
+          gh release create "$RELEASE_TAG" RedBeam-Setup-x64.exe RedBIM-Setup-x64.exe SHA256SUMS.txt Licencias-de-terceros.html \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "RedBeam $RELEASE_TAG" --latest \
+            --notes 'Descarga **RedBeam-Setup-x64.exe** para instalar en Windows x64. Las copias instaladas recibirán un aviso al abrir RedBeam y podrán descargar la actualización desde la app. Consulta el [historial de cambios](https://github.com/matfigueroac/redbeam/blob/main/CHANGELOG.md).' \
             --generate-notes

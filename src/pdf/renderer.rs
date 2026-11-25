@@ -457,7 +457,7 @@ fn extract_search_text_by_page(raw_bytes: &[u8]) -> Vec<String> {
     out
 }
 
-// RedBIM paints editable annotations over the sheet in the canvas.
+// RedBeam paints editable annotations over the sheet in the canvas.
 fn viewer_interpreter_settings() -> InterpreterSettings {
     InterpreterSettings {
         render_content: RenderContent::PAGE,

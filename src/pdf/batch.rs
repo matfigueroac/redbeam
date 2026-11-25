@@ -195,7 +195,7 @@ pub fn run_batch_job(cfg: &BatchJobConfig) -> Result<BatchJobReport, String> {
     }
 
     if cfg.export_consolidated_csv && csv_header_written {
-        let csv_path = cfg.output_dir.join("Consolidado_Cubicacion_RedBIM.csv");
+        let csv_path = cfg.output_dir.join("Consolidado_Cubicacion_RedBeam.csv");
         let csv_body = csv_lines.join("\n") + "\n";
         atomic_write_file(&csv_path, csv_body.as_bytes())?;
         report.consolidated_csv_path = Some(csv_path);

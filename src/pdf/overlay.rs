@@ -541,7 +541,7 @@ pub fn overlay_pdf_pages(
         .save_to(&mut out_bytes)
         .map_err(|e| format!("Error guardando PDF Overlay: {e}"))?;
 
-    let mut tab = open_pdf_from_bytes("Overlay_Planos_RedBIM.pdf", None, out_bytes)?;
+    let mut tab = open_pdf_from_bytes("Overlay_Planos_RedBeam.pdf", None, out_bytes)?;
     for (i, &(pa, pb)) in pairs.iter().enumerate() {
         if let Some(pm) = tab.pages.get_mut(i) {
             pm.label = Some(format!("Overlay Pág. {} vs {}", pa + 1, pb + 1));

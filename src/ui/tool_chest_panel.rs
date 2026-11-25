@@ -44,7 +44,7 @@ pub fn draw_tool_chest_panel(
         }
         if ui
             .small_button("↺")
-            .on_hover_text("Restaurar conjuntos predeterminados de RedBIM")
+            .on_hover_text("Restaurar conjuntos predeterminados de RedBeam")
             .clicked()
         {
             *chest = ToolChest::default_chilean_sets();

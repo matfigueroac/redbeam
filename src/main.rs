@@ -49,7 +49,7 @@ fn main() -> eframe::Result<()> {
     }
     let launch = parse_args();
     let viewport = egui::ViewportBuilder::default()
-        .with_title("RedBIM — Visor y Cubicación de Planos PDF (Chile / Métrico)")
+        .with_title("RedBeam — Visor y Cubicación de Planos PDF (Chile / Métrico)")
         .with_icon(Arc::new(redbim::ui::icons::generate_app_icon()))
         .with_inner_size([1440.0, 880.0])
         .with_maximized(true)
@@ -61,7 +61,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RedBIM",
+        "RedBeam",
         options,
         Box::new(move |cc| Ok(Box::new(RedBimApp::new(cc, launch)))),
     )

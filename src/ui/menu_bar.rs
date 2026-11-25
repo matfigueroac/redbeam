@@ -29,7 +29,7 @@ pub fn draw_menu_bar(
             ui.add(egui::Image::new((tid, egui::vec2(18.0, 18.0))));
         }
         ui.label(
-            RichText::new("RedBIM")
+            RichText::new("RedBeam")
                 .strong()
                 .size(13.5)
                 .color(theme.accent_red),
@@ -621,11 +621,11 @@ pub fn draw_menu_bar(
                 actions.push(UiAction::OpenDialog(DialogRequest::Shortcuts));
                 ui.close();
             }
-            if ui.button("Buscar actualizaciones…").clicked() {
+            if !crate::updates::is_packaged() && ui.button("Buscar actualizaciones…").clicked() {
                 actions.push(UiAction::CheckForUpdates);
                 ui.close();
             }
-            if ui.button("Acerca de RedBIM").clicked() {
+            if ui.button("Acerca de RedBeam").clicked() {
                 actions.push(UiAction::OpenDialog(DialogRequest::About));
                 ui.close();
             }
@@ -681,7 +681,7 @@ fn draw_window_buttons(ui: &mut egui::Ui, actions: &mut Vec<UiAction>) -> bool {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for (icon, label, command) in [
-            ("×", "Cerrar RedBIM", ViewportCommand::Close),
+            ("×", "Cerrar RedBeam", ViewportCommand::Close),
             (maximize_icon, maximize_label, ViewportCommand::Maximized(!maximized)),
             ("−", "Minimizar ventana", ViewportCommand::Minimized(true)),
         ] {

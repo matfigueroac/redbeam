@@ -438,7 +438,7 @@ impl ToolSet {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("Error leyendo archivo de conjunto: {e}"))?;
         let mut set: Self = serde_json::from_str(&raw)
-            .map_err(|e| format!("Archivo .redbim-tools.json inválido: {e}"))?;
+            .map_err(|e| format!("Archivo de herramientas inválido: {e}"))?;
         set.id = Uuid::new_v4();
         set.is_my_tools = false;
         set.is_recents = false;

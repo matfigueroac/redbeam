@@ -1305,7 +1305,7 @@ impl RedBimApp {
         self.commit_active_edit(ctx);
         self.start_pdf_job("Combinando planos…", ctx, move || {
             let bytes = combine_pdf_files(&paths)?;
-            let tab = open_pdf_from_bytes("Combinado_RedBIM.pdf", None, bytes)?;
+            let tab = open_pdf_from_bytes("Combinado_RedBeam.pdf", None, bytes)?;
             Ok(PdfJobResult::Combined(Box::new(tab)))
         });
     }
@@ -1513,7 +1513,7 @@ impl RedBimApp {
                     if !self.tabs.is_empty()
                         && let Some(path) = rfd::FileDialog::new()
                             .add_filter("PDF", &["pdf"])
-                            .set_file_name("Plano_Aplanado_RedBIM.pdf")
+                            .set_file_name("Plano_Aplanado_RedBeam.pdf")
                             .save_file()
                     {
                         self.export_flattened_to(path, ctx);
@@ -1791,11 +1791,11 @@ impl RedBimApp {
                 UiAction::ExportToolSet(set_id) => {
                     if let Some(set) = self.tool_chest.sets.iter().find(|s| s.id == set_id) {
                         let safe_name = format!(
-                            "{}.redbim-tools.json",
+                            "{}.redbeam-tools.json",
                             set.title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
                         );
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Conjunto RedBIM", &["json"])
+                            .add_filter("Conjunto RedBeam", &["json"])
                             .set_file_name(&safe_name)
                             .save_file()
                         {
@@ -1811,7 +1811,7 @@ impl RedBimApp {
                 }
                 UiAction::ImportToolSet => {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Conjunto RedBIM (.redbim-tools.json)", &["json"])
+                        .add_filter("Conjunto RedBeam (.redbeam-tools.json)", &["json"])
                         .pick_file()
                     {
                         match ToolSet::import_from_file(&path) {
@@ -1895,7 +1895,7 @@ impl RedBimApp {
                     if let Some(tab) = self.tabs.get(self.active_tab)
                         && let Some(path) = rfd::FileDialog::new()
                             .add_filter("CSV Excel", &["csv"])
-                            .set_file_name("Cubicación_RedBIM.csv")
+                            .set_file_name("Cubicación_RedBeam.csv")
                             .save_file()
                     {
                         match export_markups_csv_file(tab, &path, delim) {
@@ -1907,8 +1907,8 @@ impl RedBimApp {
                 UiAction::ExportMarkupsJson => {
                     if let Some(tab) = self.tabs.get(self.active_tab)
                         && let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Marcas RedBIM", &["json"])
-                            .set_file_name("marcas.redbim.json")
+                            .add_filter("Marcas RedBeam", &["json"])
+                            .set_file_name("marcas.redbeam.json")
                             .save_file()
                     {
                         match export_markups_json_file(tab, &path) {
@@ -1920,7 +1920,7 @@ impl RedBimApp {
                 UiAction::ImportMarkupsJson => {
                     if let Some(tab) = self.tabs.get_mut(self.active_tab)
                         && let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Marcas RedBIM", &["json"])
+                            .add_filter("Marcas RedBeam", &["json"])
                             .pick_file()
                     {
                         match import_markups_json_file(tab, &path) {
@@ -1969,7 +1969,7 @@ impl RedBimApp {
                 UiAction::ExtractCurrentPage => {
                     if let Some(tab) = self.tabs.get(self.active_tab) {
                         let pg = tab.active_page_index();
-                        let default_name = format!("Pagina_{}_RedBIM.pdf", pg + 1);
+                        let default_name = format!("Pagina_{}_RedBeam.pdf", pg + 1);
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("PDF", &["pdf"])
                             .set_file_name(&default_name)
@@ -2787,7 +2787,7 @@ impl RedBimApp {
                         ui.add_space(6.0);
                     }
                     ui.label(
-                        RichText::new("RedBIM")
+                        RichText::new("RedBeam")
                             .strong()
                             .size(32.0)
                             .color(self.theme.accent_red),
@@ -2888,9 +2888,9 @@ impl eframe::App for RedBimApp {
         // Keep OS window title synced with active document name & dirty indicator
         let desired_title = if let Some(tab) = self.tabs.get(self.active_tab) {
             let star = if tab.dirty { "*" } else { "" };
-            format!("{}{star} — RedBIM", tab.title)
+            format!("{}{star} — RedBeam", tab.title)
         } else {
-            "RedBIM — Visor y Cubicación de Planos PDF (Chile / Métrico)".to_string()
+            "RedBeam — Visor y Cubicación de Planos PDF (Chile / Métrico)".to_string()
         };
         if desired_title != self.last_window_title {
             self.last_window_title = desired_title.clone();

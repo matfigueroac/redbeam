@@ -224,7 +224,7 @@ pub fn compare_pdf_pages(
         let mut cloud = Markup::new(
             0,
             "Diferencia detectada",
-            "Comparador RedBIM",
+            "Comparador RedBeam",
             MarkupStyle {
                 stroke_color: [229, 57, 53, 255],
                 fill_color: Some([229, 57, 53, 255]),

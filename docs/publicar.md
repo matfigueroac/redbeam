@@ -1,4 +1,4 @@
-# Compilar y publicar RedBIM
+# Compilar y publicar RedBeam
 
 ## Compilación local en Windows
 
@@ -16,14 +16,30 @@ cargo test --locked --release --lib --tests
 
 Si LLVM-MinGW UCRT x64 ya está en `PATH`, puedes omitir `-IncludeLlvm` y el cambio de `PATH`. El instalador incluye el runtime de LLVM junto al ejecutable. El paquete, `SHA256SUMS.txt` y los avisos de dependencias quedan en `dist/`.
 
-Para verificar el paquete con una cuenta de prueba de Windows donde RedBIM aún no esté registrado:
+Para verificar el paquete con una cuenta de prueba de Windows donde RedBeam aún no esté registrado:
 
 ```powershell
-./installer/Test-Installer.ps1 -Installer ./dist/RedBIM-Setup-x64.exe
-Get-FileHash -Algorithm SHA256 ./dist/RedBIM-Setup-x64.exe
+./installer/Test-Installer.ps1 -Installer ./dist/RedBeam-Setup-x64.exe
+Get-FileHash -Algorithm SHA256 ./dist/RedBeam-Setup-x64.exe
 ```
 
 La prueba instala, ejecuta el programa con un `PATH` de sistema, reinstala en la misma ubicación y desinstala. También comprueba que un PDF de prueba sobrevive al proceso. Pasa `-PreviousInstaller` con el instalador de la última versión para probar el salto entre versiones.
+
+## Firmar el instalador de Windows
+
+La firma requiere un certificado Authenticode de una autoridad pública, acceso a su clave desde el almacén personal de certificados de Windows y SignTool del SDK de Windows.
+
+```powershell
+$thumbprint = Read-Host 'Huella del certificado de firma de código'
+./installer/Build-Windows.ps1 -Iscc $tools.Iscc -CargoAbout $tools.CargoAbout `
+  -OutputDirectory ./dist/signed -SigningCertificateThumbprint $thumbprint
+```
+
+Usa `-SignTool` para indicar la ruta a `signtool.exe` si no está en `PATH`, y `-TimestampUrl` para elegir el servidor RFC 3161 de tu proveedor. El script comprueba la firma y el sello de tiempo antes de generar `SHA256SUMS.txt`. Para que las copias instaladas reciban el instalador firmado, publícalo con una versión nueva. SmartScreen puede mostrar un aviso en las primeras descargas mientras se acumula reputación. [Documentación de Microsoft](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation)
+
+Configura el proveedor de firma en GitHub Actions antes de subir una etiqueta para publicar automáticamente una versión firmada.
+
+Para distribuir una edición firmada por Microsoft con actualizaciones desde la tienda, usa la [guía de Microsoft Store](microsoft-store.md).
 
 ## Preparar una versión
 
@@ -32,11 +48,11 @@ La prueba instala, ejecuta el programa con un `PATH` de sistema, reinstala en la
 3. Con el commit en `main` y los cambios revisados, crea y sube la etiqueta `vX.Y.Z` que corresponde a la versión de `Cargo.toml`.
 
 ```powershell
-git tag -a v0.2.0 -m "RedBIM 0.2.0"
+git tag -a v0.2.0 -m "RedBeam 0.2.0"
 git push origin v0.2.0
 ```
 
-Para `matfigueroac/redbim`, la etiqueta activa las pruebas, el empaquetado, la validación del instalador y la publicación en GitHub Releases. Las copias instaladas consultan `releases/latest` al abrirse y comprueban el SHA-256 del instalador antes de ejecutarlo. La descarga conserva el mismo nombre entre versiones. GitHub reserva `releases/latest` para publicaciones completas. Si cambia el repositorio de distribución, actualiza las URLs del README, `src/updates.rs`, el instalador y la condición de publicación del flujo. [Documentación de GitHub Releases](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+Para `matfigueroac/redbeam`, la etiqueta activa las pruebas, el empaquetado, la validación del instalador y la publicación en GitHub Releases. Las copias instaladas consultan `releases/latest` al abrirse y comprueban el SHA-256 del instalador antes de ejecutarlo. La descarga conserva el mismo nombre entre versiones. GitHub reserva `releases/latest` para publicaciones completas. Si cambia el repositorio de distribución, actualiza las URLs del README, `src/updates.rs`, el instalador y la condición de publicación del flujo. [Documentación de GitHub Releases](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
 
 ## Ejecutar desde el código fuente
 

@@ -312,7 +312,7 @@ pub fn remove_headers_footers_in_tab(tab: &mut DocumentTab) -> Result<usize, Str
         }
     }
     if removed == 0 {
-        return Err("No se encontraron encabezados/pies de RedBIM para quitar.".to_string());
+        return Err("No se encontraron encabezados/pies de RedBeam para quitar.".to_string());
     }
     let mut out = Vec::new();
     doc.save_to(&mut out)

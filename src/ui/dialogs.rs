@@ -231,7 +231,7 @@ impl ActiveModal {
             },
             DialogRequest::CreateStamp => Self::CreateStamp {
                 title: "REVISADO".to_string(),
-                subtitle: "RedBIM Chile".to_string(),
+                subtitle: "RedBeam Chile".to_string(),
                 color: [229, 57, 53],
                 show_date: true,
                 show_author: true,
@@ -287,7 +287,7 @@ impl ActiveModal {
                 hf_cfg: HeaderFooterConfig::default(),
                 apply_stamp: false,
                 stamp_title: "PARA CONSTRUCCIÓN".to_string(),
-                stamp_subtitle: "Emitido en lote - RedBIM".to_string(),
+                stamp_subtitle: "Emitido en lote - RedBeam".to_string(),
                 stamp_color: [37, 99, 235],
                 stamp_placement: BatchStampPlacement::TopRight,
                 export_consolidated_csv: true,
@@ -759,7 +759,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Preferences => {
-            egui::Window::new("Preferencias de RedBIM")
+            egui::Window::new("Preferencias de RedBeam")
                 .collapsible(false)
                 .resizable(false)
                 .default_width(420.0)
@@ -885,7 +885,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Shortcuts => {
-            egui::Window::new("Atajos de teclado RedBIM")
+            egui::Window::new("Atajos de teclado RedBeam")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1066,14 +1066,14 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::About => {
-            egui::Window::new("Acerca de RedBIM")
+            egui::Window::new("Acerca de RedBeam")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut keep_open)
                 .show(ctx, |ui| {
                     ui.label(
-                        RichText::new(concat!("RedBIM v", env!("CARGO_PKG_VERSION")))
+                        RichText::new(concat!("RedBeam v", env!("CARGO_PKG_VERSION")))
                             .strong()
                             .size(18.0)
                             .color(theme.accent_red),

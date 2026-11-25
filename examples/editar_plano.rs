@@ -58,7 +58,7 @@ fn add_change(tab: &mut DocumentTab, index: usize) {
     let mark = Markup::new(
         0,
         format!("Prueba {index}"),
-        "RedBIM",
+        "RedBeam",
         MarkupStyle::default(),
         kind,
     );
@@ -184,7 +184,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RedBIM · Memoria al editar",
+        "RedBeam · Memoria al editar",
         options,
         Box::new(move |cc| {
             let mut app = RedBimApp::new(

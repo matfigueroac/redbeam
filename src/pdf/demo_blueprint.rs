@@ -800,7 +800,7 @@ pub fn create_demo_markups() -> Vec<Markup> {
         MarkupKind::Stamp {
             rect: Rect2::from_xywh(ox + 18.0 * s, oy + 28.0 * s, 17.5 * s, 3.8 * s),
             title: "PRELIMINAR".to_string(),
-            subtitle: "Revisión RedBIM Chile".to_string(),
+            subtitle: "Revisión RedBeam Chile".to_string(),
             show_date: true,
             show_author: true,
         },

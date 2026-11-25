@@ -12,5 +12,5 @@ fn main() {
     .expect("could not write the Windows resource version");
     embed_resource::compile("assets/redbim.rc", embed_resource::NONE)
         .manifest_required()
-        .expect("could not compile RedBIM Windows resources");
+        .expect("could not compile RedBeam Windows resources");
 }

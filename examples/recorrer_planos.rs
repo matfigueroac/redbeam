@@ -121,7 +121,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RedBIM · Rendimiento",
+        "RedBeam · Rendimiento",
         options,
         Box::new(move |cc| {
             let app = RedBimApp::new(

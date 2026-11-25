@@ -1,4 +1,4 @@
-//! Medidor de página en la ventana nativa de RedBIM.
+//! Medidor de página en la ventana nativa de RedBeam.
 use eframe::egui;
 use redbim::app::{LaunchConfig, RedBimApp};
 use redbim::geometry::math::Rect2;
@@ -44,7 +44,7 @@ fn mark(tab: &mut DocumentTab) {
             tab.markups.push(Markup::new(
                 page,
                 format!("Medición de página {}", page + 1),
-                "RedBIM",
+                "RedBeam",
                 MarkupStyle::default(),
                 MarkupKind::Rectangle {
                     rect: Rect2::from_xywh(
@@ -221,7 +221,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "RedBIM · Operaciones de página",
+        "RedBeam · Operaciones de página",
         options,
         Box::new(move |cc| {
             let mut app = RedBimApp::new(
