@@ -66,8 +66,11 @@ try {
     if ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -ne $version) {
         throw 'Windows no registró la versión esperada después de actualizar.'
     }
-    if ((Get-Item -LiteralPath (Get-ItemProperty -LiteralPath $uninstallKey).InstallLocation).FullName -ne $installed) {
-        throw 'RedBIM no podrá reconocer la ubicación de su instalación para actualizarse.'
+    $registered = (Get-ItemProperty -LiteralPath $uninstallKey).InstallLocation
+    $registeredDir = [IO.Path]::TrimEndingDirectorySeparator((Get-Item -LiteralPath $registered).FullName)
+    $expectedDir = [IO.Path]::TrimEndingDirectorySeparator((Get-Item -LiteralPath $installed).FullName)
+    if ($registeredDir -ne $expectedDir) {
+        throw "La ubicación registrada ($registeredDir) no coincide con la carpeta de instalación ($expectedDir)."
     }
     if ($PreviousInstaller -and (Get-FileHash -LiteralPath $app).Hash -eq $oldBinaryHash) {
         throw 'La actualización dejó el ejecutable anterior.'
