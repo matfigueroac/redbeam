@@ -1,6 +1,6 @@
 use crate::geometry::math::{Point2, Rect2};
 use crate::model::document::AlignKind;
-use crate::model::markup::MarkupStatus;
+use crate::model::markup::{HyperlinkTarget, MarkupStatus};
 use crate::model::scale::PageScale;
 use crate::model::settings::{CsvDelimiter, ThemeMode};
 use crate::model::tool_chest::{ActiveTool, ToolChestItem};
@@ -22,10 +22,34 @@ pub enum DialogRequest {
     },
     SketchToScale,
     CreateStamp,
+    ManageCustomColumns,
+    EditPageLabel {
+        page_index: usize,
+    },
+    OverlayPdfs,
+    VisualSearchResults {
+        result: crate::pdf::visual_search::VisualSearchResult,
+    },
+    HeadersAndFooters,
+    BatchProcess,
+    ConfigureSequence {
+        item_id: Uuid,
+    },
+    PhotoPreview {
+        attachment_id: Uuid,
+        caption: String,
+    },
+    ApplyRedactionsConfirm,
+    ColorProcess,
+    ReduceFileSize,
     Preferences,
     Shortcuts,
     CommandPalette,
     About,
+    ConfirmClose {
+        /// `Some(idx)` = closing a specific tab; `None` = exiting the whole app.
+        tab_idx: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +61,43 @@ pub enum UiAction {
     SaveDocument,
     SaveDocumentAs,
     ExportFlattenedPdf,
+    FlattenInPlace {
+        recoverable: bool,
+    },
+    UnflattenDocument,
+    ReplaceCurrentPageContent,
+    RunOverlay {
+        pdf_b_path: PathBuf,
+        color_a: [u8; 3],
+        color_b: [u8; 3],
+        alignment: crate::pdf::overlay::OverlayAlignmentMode,
+        all_pages: bool,
+    },
+    RunVisualSearch(Rect2),
+    CreateCountFromVisualSearch {
+        page_index: usize,
+        subject: String,
+        points: Vec<Point2>,
+    },
+    ApplyHeadersFooters(crate::pdf::headers_footers::HeaderFooterConfig),
+    RemoveHeadersFooters,
+    RunBatchJob(crate::pdf::batch::BatchJobConfig),
+    AttachPhotoToSelected,
+    DeleteAttachment {
+        markup_id: Uuid,
+        attachment_id: Uuid,
+    },
+    ConsumeToolSequence {
+        item_id: Uuid,
+        markup_id: Uuid,
+    },
+    ExportToolSet(Uuid),
+    ImportToolSet,
+    ApplyRedactions {
+        fill_color: [u8; 3],
+    },
+    RunColorProcess(crate::pdf::color_process::ColorProcessConfig),
+    RunReduceFileSize(crate::pdf::optimize::OptimizePreset),
     ExportCsv(CsvDelimiter),
     ExportMarkupsJson,
     ImportMarkupsJson,
@@ -44,12 +105,14 @@ pub enum UiAction {
     CompareWithPdf,
     ExtractCurrentPage,
     CloseTab(usize),
+    ForceCloseTab(usize),
     SelectTab(usize),
 
     Undo,
     Redo,
     CopySelected,
     PasteClipboard,
+    PasteInPlace,
     DuplicateSelected,
     DeleteSelected,
     SelectAllOnPage,
@@ -60,6 +123,7 @@ pub enum UiAction {
     SendToBack,
     SnapSelectedToContent,
     ToggleLockSelected,
+    ShowMarkupProperties,
 
     SetTool(ActiveTool),
     ActivateToolChestItem(ToolChestItem),
@@ -73,15 +137,24 @@ pub enum UiAction {
     ZoomStep(f64),
     GoToPage(usize),
     JumpToMarkup(Uuid),
+    LocateTextMarkup(Uuid),
     JumpToPageText(usize),
 
     ToggleSplitVertical,
     ToggleSplitHorizontal,
+    ToggleSyncSplitViews,
     SetSplitNone,
 
     RotatePage(usize, i32),
     InsertBlankPage(usize),
     DeletePage(usize),
+    RenamePageLabel {
+        page_index: usize,
+        label: String,
+    },
+    FollowHyperlink(HyperlinkTarget),
+    DeleteSpace(Uuid),
+    ToggleHighlightSpaces,
 
     ApplyPageScale {
         scale: PageScale,
@@ -107,5 +180,7 @@ pub enum UiAction {
     StartInlineEdit(Uuid),
     RequestRedrawTextures,
     ShowToast(String),
+    CheckForUpdates,
     ExitApp,
+    ForceExitApp,
 }

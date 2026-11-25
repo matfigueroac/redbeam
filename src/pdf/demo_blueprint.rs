@@ -655,7 +655,7 @@ pub fn create_demo_markups() -> Vec<Markup> {
                 .corners()
                 .to_vec(),
             is_rect: true,
-            knee: Point2::new(ox + 17.5 * s, oy + 4.0 * s),
+            knee: Point2::new(ox + 17.5 * s, oy + (2.5 + 3.3 / 2.0) * s),
             box_rect: Rect2::from_xywh(ox + 19.2 * s, oy + 2.5 * s, 15.5 * s, 3.3 * s),
             text: "Verificar distanciamiento 1,20 m al borde".to_string(),
         },
@@ -679,7 +679,7 @@ pub fn create_demo_markups() -> Vec<Markup> {
         },
         MarkupKind::Callout {
             arrow_tip: Point2::new(ox + 48.0 * s, oy + 14.5 * s),
-            knee: Point2::new(ox + 50.5 * s, oy + 26.2 * s),
+            knee: Point2::new(ox + 50.5 * s, oy + (24.8 + 3.3 / 2.0) * s),
             box_rect: Rect2::from_xywh(ox + 52.0 * s, oy + 24.8 * s, 14.8 * s, 3.3 * s),
             text: "Reforzar costanera en faldón F1".to_string(),
         },

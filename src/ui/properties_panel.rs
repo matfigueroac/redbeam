@@ -1,13 +1,18 @@
+use crate::model::custom_columns::{
+    CustomColumnKind, CustomColumnValue, evaluate_column_cell,
+};
 use crate::model::document::DocumentTab;
 use crate::model::markup::{
-    BoxShape, CommentReply, CountStyle, HatchPattern, LineEnd, LineStyle, Markup, MarkupKind,
-    MarkupStatus, NoteIcon,
+    BoxShape, CommentReply, CountStyle, HatchPattern, HyperlinkTarget, LineEnd, LineStyle, Markup,
+    MarkupKind, MarkupStatus, NoteIcon,
 };
 use crate::model::units::{LengthUnit, Precision, SlopeFormat, format_area};
-use crate::ui::actions::UiAction;
+use crate::ui::actions::{DialogRequest, UiAction};
+use crate::ui::canvas::fit_callout_text;
 use crate::ui::theme::RedBimTheme;
 use chrono::Utc;
-use eframe::egui::{self, Color32, CornerRadius, Pos2, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Pos2, RichText, Sense, Stroke, TextureHandle, Vec2};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const QUICK_COLORS: &[[u8; 4]] = &[
@@ -62,6 +67,8 @@ fn supports_fill(kind: &MarkupKind) -> bool {
             | MarkupKind::SketchPoly { .. }
             | MarkupKind::Stamp { .. }
             | MarkupKind::Legend { .. }
+            | MarkupKind::Hyperlink { .. }
+            | MarkupKind::Redaction { .. }
     )
 }
 
@@ -185,7 +192,7 @@ fn line_end_icon_button(
         LineEnd::Circle => {
             p.circle_filled(Pos2::new(x1 - 1.0, cy), 3.3, fg);
         }
-        LineEnd::None | _ => {}
+        _ => {}
     }
 
     resp.on_hover_text(tooltip)
@@ -231,6 +238,7 @@ pub fn draw_properties_panel(
     tab: Option<&mut DocumentTab>,
     author_name: &str,
     reply_draft: &mut String,
+    image_textures: &HashMap<Uuid, TextureHandle>,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
@@ -271,8 +279,18 @@ pub fn draw_properties_panel(
     let page_idx = tab.markups[idx].page_index;
     let page = tab.pages.get(page_idx).cloned();
     let layer_names: Vec<String> = tab.layers.iter().map(|l| l.name.clone()).collect();
+    let page_labels: Vec<(usize, String)> = tab
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i, p.display_label()))
+        .collect();
+    let custom_columns = tab.custom_columns.clone();
 
     let orig = tab.markups[idx].clone();
+    let enclosing_space = tab.resolve_space_for_markup(&orig);
+    let layer_locked = tab.is_layer_locked(&orig.layer);
+    let was_locked = orig.locked || layer_locked;
     let mut m = orig.clone();
     let mut changed = false;
 
@@ -353,6 +371,15 @@ pub fn draw_properties_panel(
                         }
                     }
 
+                    if let Some(ref sp_name) = enclosing_space {
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(format!("Espacio: {sp_name}"))
+                                .size(11.0)
+                                .color(theme.accent_amber),
+                        );
+                    }
+
                     // Quick action bar
                     if !m.locked && m.is_measurement() {
                         ui.add_space(4.0);
@@ -372,6 +399,157 @@ pub fn draw_properties_panel(
                         }
                     }
                 });
+
+            ui.push_id(m.id, |ui| {
+                let label = match &m.kind {
+                    MarkupKind::Stamp { .. } | MarkupKind::Legend { .. } => "Título",
+                    MarkupKind::Hyperlink { .. } => "Etiqueta visible",
+                    _ if m.text_content().is_some() => "Texto",
+                    _ => "Comentario",
+                };
+                ui.label(RichText::new(label).strong().size(12.0));
+                let mut text = m.text_content().unwrap_or(&m.comment).to_owned();
+                if ui.add_enabled(
+                    !was_locked,
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                ).changed() {
+                    m.set_text_content(text);
+                    changed = true;
+                }
+                if let MarkupKind::Stamp { subtitle, .. } = &mut m.kind {
+                    ui.label(RichText::new("Subtítulo").size(11.0).color(theme.text_secondary));
+                    changed |= ui.add_enabled(
+                        !was_locked,
+                        egui::TextEdit::singleline(subtitle).desired_width(f32::INFINITY),
+                    ).changed();
+                }
+            });
+
+            // ── 1b. Hyperlink destination editor ────────────────────────────
+            if let MarkupKind::Hyperlink {
+                target,
+                ..
+            } = &mut m.kind
+            {
+                egui::Frame::new()
+                    .fill(theme.card_bg)
+                    .stroke(Stroke::new(1.0, theme.border))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Destino del Hipervínculo")
+                                .strong()
+                                .size(12.0)
+                                .color(theme.text_primary),
+                        );
+                        ui.horizontal(|ui| {
+                            let is_page = matches!(target, HyperlinkTarget::Page { .. });
+                            if segmented_pill(ui, "Lámina", is_page, "Saltar a otra página del PDF", theme).clicked()
+                                && !is_page
+                            {
+                                *target = HyperlinkTarget::Page { page_index: 0 };
+                                changed = true;
+                            }
+                            if segmented_pill(ui, "URL externa", !is_page, "Abrir sitio web http/https", theme).clicked()
+                                && is_page
+                            {
+                                *target = HyperlinkTarget::Url("https://".to_string());
+                                changed = true;
+                            }
+                        });
+                        match target {
+                            HyperlinkTarget::Page { page_index } => {
+                                let cur_lbl = page_labels
+                                    .iter()
+                                    .find(|(i, _)| *i == *page_index)
+                                    .map(|(_, l)| l.clone())
+                                    .unwrap_or_else(|| format!("Página {}", *page_index + 1));
+                                egui::ComboBox::from_id_salt("props_hl_page")
+                                    .selected_text(cur_lbl)
+                                    .width(ui.available_width())
+                                    .show_ui(ui, |ui| {
+                                        for (pi, lbl) in &page_labels {
+                                            if ui.selectable_value(page_index, *pi, lbl).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                            }
+                            HyperlinkTarget::Url(url) => {
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(url)
+                                            .hint_text("https://ejemplo.cl/especificacion")
+                                            .desired_width(f32::INFINITY),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::new(RichText::new("🔗 Abrir destino →").size(11.5)),
+                            )
+                            .clicked()
+                        {
+                            actions.push(UiAction::FollowHyperlink(target.clone()));
+                        }
+                    });
+            }
+
+            // ── 1c. Redaction overlay editor & Apply CTA ────────────────────
+            if let MarkupKind::Redaction { overlay_text, .. } = &mut m.kind {
+                egui::Frame::new()
+                    .fill(theme.card_bg)
+                    .stroke(Stroke::new(1.2, theme.accent_red))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Redacción pendiente (Censura)")
+                                .strong()
+                                .size(12.0)
+                                .color(theme.accent_red),
+                        );
+                        ui.label(
+                            RichText::new("Texto superpuesto al aplicar:")
+                                .size(11.0)
+                                .color(theme.text_secondary),
+                        );
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(overlay_text)
+                                    .hint_text("Ej: CENSURADO, CONFIDENCIAL, o vacío")
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        ui.add_space(4.0);
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::new(
+                                    RichText::new("Aplicar redacciones (Irreversible)...")
+                                        .strong()
+                                        .color(theme.accent_red),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            actions.push(UiAction::OpenDialog(
+                                DialogRequest::ApplyRedactionsConfirm,
+                            ));
+                        }
+                    });
+            }
 
             // ── 2. Cota y Medición (or Puntas de línea) ──────────────────────
             let show_ends = supports_line_ends(&m.kind);
@@ -1014,27 +1192,6 @@ pub fn draw_properties_panel(
                         });
 
                     ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Comentario / Texto")
-                            .size(11.0)
-                            .color(theme.text_secondary),
-                    );
-                    let mut txt = m
-                        .text_content()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| m.comment.clone());
-                    if ui
-                        .add(
-                            egui::TextEdit::multiline(&mut txt)
-                                .desired_rows(2)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed()
-                    {
-                        m.set_text_content(txt);
-                        changed = true;
-                    }
-
                     // Replies thread
                     if !m.replies.is_empty() {
                         ui.add_space(4.0);
@@ -1078,6 +1235,297 @@ pub fn draw_properties_panel(
                     });
                 });
 
+            // ── 4b. Columnas personalizadas y fórmulas (Bluebeam-style) ─────
+            egui::CollapsingHeader::new(
+                RichText::new(format!(
+                    "Columnas y Fórmulas ({})",
+                    custom_columns.len()
+                ))
+                .strong()
+                .size(12.0),
+            )
+            .id_salt("props_sec_custom_cols")
+            .default_open(!custom_columns.is_empty())
+            .show(ui, |ui| {
+                let metrics_opt = page
+                    .as_ref()
+                    .map(|p| m.compute_metrics(&p.scale, &p.viewports));
+                let default_metrics = crate::model::markup::ComputedMetrics::default();
+                let metrics_ref = metrics_opt.as_ref().unwrap_or(&default_metrics);
+                let default_scale = crate::model::scale::PageScale::default();
+                let (scale_ref, viewports_ref) = page
+                    .as_ref()
+                    .map(|p| (&p.scale, p.viewports.as_slice()))
+                    .unwrap_or((&default_scale, &[]));
+
+                if custom_columns.is_empty() {
+                    ui.label(
+                        RichText::new("Sin columnas personalizadas definidas.")
+                            .size(11.0)
+                            .color(theme.text_muted),
+                    );
+                } else {
+                    egui::Grid::new("props_custom_cols_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 5.0])
+                        .show(ui, |ui| {
+                            for col in &custom_columns {
+                                ui.label(
+                                    RichText::new(&col.name)
+                                        .size(11.0)
+                                        .color(theme.text_secondary),
+                                );
+                                match &col.kind {
+                                    CustomColumnKind::Text { default_value } => {
+                                        let mut s = match m.custom_values.get(&col.id) {
+                                            Some(CustomColumnValue::Text(v)) => v.clone(),
+                                            _ => default_value.clone(),
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut s)
+                                                    .desired_width(135.0),
+                                            )
+                                            .changed()
+                                        {
+                                            m.custom_values
+                                                .insert(col.id, CustomColumnValue::Text(s));
+                                            changed = true;
+                                        }
+                                    }
+                                    CustomColumnKind::Number {
+                                        default_value,
+                                        prefix,
+                                        suffix,
+                                        decimals,
+                                        ..
+                                    } => {
+                                        let mut v = match m.custom_values.get(&col.id) {
+                                            Some(CustomColumnValue::Number(n)) => *n,
+                                            _ => *default_value,
+                                        };
+                                        let mut dv = egui::DragValue::new(&mut v)
+                                            .speed(0.1)
+                                            .max_decimals(*decimals);
+                                        if !prefix.is_empty() {
+                                            dv = dv.prefix(prefix);
+                                        }
+                                        if !suffix.is_empty() {
+                                            dv = dv.suffix(suffix);
+                                        }
+                                        if ui.add(dv).changed() {
+                                            m.custom_values
+                                                .insert(col.id, CustomColumnValue::Number(v));
+                                            changed = true;
+                                        }
+                                    }
+                                    CustomColumnKind::Choice { items, .. } => {
+                                        let mut cur = match m.custom_values.get(&col.id) {
+                                            Some(CustomColumnValue::Text(s)) => s.clone(),
+                                            _ => String::new(),
+                                        };
+                                        let sel_lbl = if cur.is_empty() {
+                                            "—"
+                                        } else {
+                                            cur.as_str()
+                                        };
+                                        egui::ComboBox::from_id_salt(("props_cc_ch", col.id))
+                                            .selected_text(sel_lbl)
+                                            .width(135.0)
+                                            .show_ui(ui, |ui| {
+                                                if ui
+                                                    .selectable_value(
+                                                        &mut cur,
+                                                        String::new(),
+                                                        "—",
+                                                    )
+                                                    .changed()
+                                                {
+                                                    m.custom_values.remove(&col.id);
+                                                    changed = true;
+                                                }
+                                                for opt in items {
+                                                    let disp = if let Some(nv) = opt.numeric_value {
+                                                        format!("{} ({nv})", opt.label)
+                                                    } else {
+                                                        opt.label.clone()
+                                                    };
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut cur,
+                                                            opt.label.clone(),
+                                                            disp,
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        m.custom_values.insert(
+                                                            col.id,
+                                                            CustomColumnValue::Text(
+                                                                opt.label.clone(),
+                                                            ),
+                                                        );
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                    }
+                                    CustomColumnKind::Checkmark { default_value } => {
+                                        let mut b = match m.custom_values.get(&col.id) {
+                                            Some(CustomColumnValue::Bool(v)) => *v,
+                                            _ => *default_value,
+                                        };
+                                        if ui.checkbox(&mut b, "").changed() {
+                                            m.custom_values
+                                                .insert(col.id, CustomColumnValue::Bool(b));
+                                            changed = true;
+                                        }
+                                    }
+                                    CustomColumnKind::Formula { expression, .. } => {
+                                        let cell = evaluate_column_cell(
+                                            col,
+                                            &custom_columns,
+                                            &m,
+                                            metrics_ref,
+                                            scale_ref,
+                                            viewports_ref,
+                                        );
+                                        let color = if cell.error.is_some() {
+                                            theme.accent_amber
+                                        } else {
+                                            theme.accent_green
+                                        };
+                                        let tip = if let Some(err) = cell.error {
+                                            format!("Fórmula: {expression}\nError: {err}")
+                                        } else {
+                                            format!("Fórmula: {expression}")
+                                        };
+                                        ui.label(
+                                            RichText::new(if cell.display.is_empty() {
+                                                "—".to_string()
+                                            } else {
+                                                cell.display
+                                            })
+                                            .strong()
+                                            .size(11.5)
+                                            .color(color),
+                                        )
+                                        .on_hover_text(tip);
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                }
+                ui.add_space(4.0);
+                if ui
+                    .small_button("⚙ Gestionar columnas y fórmulas...")
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenDialog(DialogRequest::ManageCustomColumns));
+                }
+            });
+
+            // ── 4c. Fotos de terreno / Capturas (Markup Capture) ────────────
+            egui::CollapsingHeader::new(
+                RichText::new(format!("Fotos de terreno ({})", m.attachments.len()))
+                    .strong()
+                    .size(12.0),
+            )
+            .id_salt("props_sec_photos")
+            .default_open(!m.attachments.is_empty())
+            .show(ui, |ui| {
+                if ui
+                    .add_enabled(
+                        !was_locked,
+                        egui::Button::new(RichText::new("📷 + Adjuntar foto local...").size(11.5)),
+                    )
+                    .on_hover_text("Adjuntar foto de obra (PNG/JPG) a esta marca")
+                    .clicked()
+                {
+                    actions.push(UiAction::AttachPhotoToSelected);
+                }
+                if m.attachments.is_empty() {
+                    ui.label(
+                        RichText::new("Sin fotos adjuntas.")
+                            .size(11.0)
+                            .color(theme.text_muted),
+                    );
+                } else {
+                    ui.add_space(4.0);
+                    let mut del_att: Option<Uuid> = None;
+                    for att in &mut m.attachments {
+                        egui::Frame::new()
+                            .fill(theme.card_bg)
+                            .stroke(Stroke::new(1.0, theme.border))
+                            .corner_radius(CornerRadius::same(5))
+                            .inner_margin(egui::Margin::same(5))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if let Some(tex) = image_textures.get(&att.id) {
+                                        let sz = tex.size_vec2();
+                                        let thumb_h = 44.0_f32;
+                                        let thumb_w = (thumb_h * sz.x / sz.y.max(1.0)).clamp(36.0, 72.0);
+                                        let img_resp = ui
+                                            .add(
+                                                egui::Image::new((
+                                                    tex.id(),
+                                                    Vec2::new(thumb_w, thumb_h),
+                                                ))
+                                                .sense(Sense::click()),
+                                            )
+                                            .on_hover_text("Clic para ampliar foto");
+                                        if img_resp.clicked() {
+                                            actions.push(UiAction::OpenDialog(
+                                                DialogRequest::PhotoPreview {
+                                                    attachment_id: att.id,
+                                                    caption: att.caption.clone(),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                    ui.vertical(|ui| {
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut att.caption)
+                                                    .desired_width(120.0),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(
+                                                    att.captured_at
+                                                        .format("%d/%m/%Y %H:%M")
+                                                        .to_string(),
+                                                )
+                                                .size(10.0)
+                                                .color(theme.text_muted),
+                                            );
+                                            if !was_locked
+                                                && ui
+                                                    .small_button("✕")
+                                                    .on_hover_text("Quitar foto")
+                                                    .clicked()
+                                            {
+                                                del_att = Some(att.id);
+                                            }
+                                        });
+                                    });
+                                });
+                            });
+                        ui.add_space(3.0);
+                    }
+                    if let Some(aid) = del_att {
+                        actions.push(UiAction::DeleteAttachment {
+                            markup_id: m.id,
+                            attachment_id: aid,
+                        });
+                    }
+                }
+            });
+
             // ── 5. Compact Footer Actions ────────────────────────────────────
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -1119,22 +1567,41 @@ pub fn draw_properties_panel(
         });
 
     if changed {
+        let locked_changed = m.locked != orig.locked;
+        if was_locked && !locked_changed {
+            // Markup or its layer is locked; ignore edits other than toggling lock
+            return;
+        }
         let now = Utc::now();
         m.modified_at = now;
         tab.push_undo();
         tab.ensure_layer(&m.layer);
         let selected_ids = tab.selected_ids.clone();
-        tab.markups[idx] = m.clone();
+        let locked_layers: std::collections::HashSet<String> = tab
+            .layers
+            .iter()
+            .filter(|l| l.locked)
+            .map(|l| l.name.clone())
+            .collect();
+        if was_locked {
+            // Only lock flag toggled
+            tab.markups[idx].locked = m.locked;
+            tab.markups[idx].modified_at = now;
+        } else {
+            if m.text_content() != orig.text_content() || m.style.font_size != orig.style.font_size {
+                fit_callout_text(ui.ctx(), &mut m, false);
+            }
+            tab.markups[idx] = m.clone();
+        }
 
         // Propagate only the fields that actually changed to any additional selected markups
         if selected_ids.len() > 1 {
-            let locked_changed = m.locked != orig.locked;
-            let subject_changed = m.subject != orig.subject;
-            let label_changed = m.label != orig.label;
-            let author_changed = m.author != orig.author;
-            let status_changed = m.status != orig.status;
-            let layer_changed = m.layer != orig.layer;
-            let unit_cost_changed = m.unit_cost != orig.unit_cost;
+            let subject_changed = !was_locked && m.subject != orig.subject;
+            let label_changed = !was_locked && m.label != orig.label;
+            let author_changed = !was_locked && m.author != orig.author;
+            let status_changed = !was_locked && m.status != orig.status;
+            let layer_changed = !was_locked && m.layer != orig.layer;
+            let unit_cost_changed = !was_locked && m.unit_cost != orig.unit_cost;
 
             let s_new = &m.style;
             let s_old = &orig.style;
@@ -1145,12 +1612,13 @@ pub fn draw_properties_panel(
                 if other.id == first_id || !selected_ids.contains(&other.id) {
                     continue;
                 }
+                let other_layer_locked = locked_layers.contains(&other.layer);
                 let mut touched = false;
-                if locked_changed {
+                if locked_changed && !other_layer_locked {
                     other.locked = m.locked;
                     touched = true;
                 }
-                if other.locked {
+                if other.locked || other_layer_locked {
                     if touched {
                         other.modified_at = now;
                     }
@@ -1220,6 +1688,7 @@ pub fn draw_properties_panel(
                 }
                 if (s_new.font_size - s_old.font_size).abs() > f32::EPSILON {
                     other.style.font_size = s_new.font_size;
+                    fit_callout_text(ui.ctx(), other, false);
                     touched = true;
                 }
                 if s_new.box_shape != s_old.box_shape {

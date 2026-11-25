@@ -10,7 +10,11 @@ pub fn draw_search_panel(
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
-    ui.label(RichText::new("Buscar en plano y marcas").strong().size(13.0));
+    ui.label(
+        RichText::new("Buscar en plano y marcas")
+            .strong()
+            .size(13.0),
+    );
     ui.add(
         egui::TextEdit::singleline(query)
             .hint_text("Texto en plano, comentario o etiqueta...")
@@ -82,9 +86,8 @@ pub fn draw_search_panel(
 
             // Search extracted PDF page text
             for (idx, txt) in tab.search_text_by_page.iter().enumerate() {
-                if txt.to_lowercase().contains(&q) {
+                if let Some(snippet) = extract_snippet(txt, &q) {
                     hits += 1;
-                    let snippet = extract_snippet(txt, &q);
                     let resp = egui::Frame::new()
                         .fill(theme.card_bg)
                         .stroke(Stroke::new(1.0, theme.border))
@@ -98,7 +101,11 @@ pub fn draw_search_panel(
                                     .size(11.5)
                                     .color(theme.accent_green),
                             );
-                            ui.label(RichText::new(snippet).size(11.0).color(theme.text_secondary));
+                            ui.label(
+                                RichText::new(snippet)
+                                    .size(11.0)
+                                    .color(theme.text_secondary),
+                            );
                         })
                         .response;
                     if resp.interact(egui::Sense::click()).clicked() {
@@ -118,22 +125,43 @@ pub fn draw_search_panel(
         });
 }
 
-fn extract_snippet(text: &str, q_lower: &str) -> String {
+fn extract_snippet(text: &str, q_lower: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    if let Some(pos) = lower.find(q_lower) {
-        let start = text[..pos]
-            .char_indices()
-            .rev()
-            .nth(24)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let end = text[pos..]
-            .char_indices()
-            .nth(64)
-            .map(|(i, _)| pos + i)
-            .unwrap_or(text.len());
-        text[start..end].replace(['\n', '\r'], " ").trim().to_string()
-    } else {
-        String::new()
+    let pos = lower.find(q_lower)?;
+    // Some letters expand in lowercase. Map the hit back to its original character.
+    let mut folded_offset = 0;
+    let (original, _) = text.char_indices().find(|(_, c)| {
+        folded_offset += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+        folded_offset > pos
+    })?;
+    let start = text[..original]
+        .char_indices()
+        .rev()
+        .nth(23)
+        .map_or(0, |(i, _)| i);
+    let end = text[original..]
+        .char_indices()
+        .nth(64)
+        .map_or(text.len(), |(i, _)| original + i);
+    Some(
+        text[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippets_preserve_drawing_codes_and_unicode() {
+        let text = "İZMİR — ÁREA CUBIERTA\nPV-01";
+        assert_eq!(
+            extract_snippet(text, "pv-01").as_deref(),
+            Some("İZMİR — ÁREA CUBIERTA PV-01")
+        );
+        assert!(extract_snippet(text, "cimentación").is_none());
     }
 }

@@ -18,6 +18,7 @@ pub struct RedBimTheme {
     pub text_muted: Color32,
     pub accent_red: Color32,
     pub accent_red_soft: Color32,
+    pub text_on_accent: Color32,
     pub accent_cyan: Color32,
     pub accent_amber: Color32,
     pub accent_green: Color32,
@@ -28,43 +29,45 @@ impl RedBimTheme {
         match mode {
             ThemeMode::Dark => Self {
                 mode,
-                window_bg: Color32::from_rgb(19, 22, 29),
-                panel_bg: Color32::from_rgb(25, 29, 38),
-                toolbar_bg: Color32::from_rgb(30, 35, 46),
-                canvas_bg: Color32::from_rgb(14, 17, 23),
-                card_bg: Color32::from_rgb(33, 39, 51),
-                control_bg: Color32::from_rgb(40, 47, 61),
-                control_hover: Color32::from_rgb(54, 63, 82),
-                border: Color32::from_rgb(47, 55, 72),
-                border_strong: Color32::from_rgb(76, 89, 114),
-                text_primary: Color32::from_rgb(242, 246, 252),
-                text_secondary: Color32::from_rgb(200, 210, 224),
-                text_muted: Color32::from_rgb(142, 156, 178),
-                accent_red: Color32::from_rgb(232, 56, 62),
-                accent_red_soft: Color32::from_rgba_unmultiplied(232, 56, 62, 42),
-                accent_cyan: Color32::from_rgb(56, 189, 248),
-                accent_amber: Color32::from_rgb(245, 158, 11),
-                accent_green: Color32::from_rgb(34, 197, 94),
+                window_bg: Color32::from_rgb(36, 30, 28),
+                panel_bg: Color32::from_rgb(43, 36, 33),
+                toolbar_bg: Color32::from_rgb(50, 41, 36),
+                canvas_bg: Color32::from_rgb(29, 25, 23),
+                card_bg: Color32::from_rgb(55, 45, 40),
+                control_bg: Color32::from_rgb(64, 52, 45),
+                control_hover: Color32::from_rgb(79, 63, 54),
+                border: Color32::from_rgb(73, 59, 51),
+                border_strong: Color32::from_rgb(121, 96, 80),
+                text_primary: Color32::from_rgb(248, 237, 226),
+                text_secondary: Color32::from_rgb(221, 199, 181),
+                text_muted: Color32::from_rgb(181, 157, 141),
+                accent_red: Color32::from_rgb(232, 151, 121),
+                accent_red_soft: Color32::from_rgb(83, 53, 44),
+                text_on_accent: Color32::from_rgb(45, 29, 23),
+                accent_cyan: Color32::from_rgb(160, 198, 185),
+                accent_amber: Color32::from_rgb(239, 185, 106),
+                accent_green: Color32::from_rgb(163, 195, 141),
             },
             ThemeMode::Light => Self {
                 mode,
-                window_bg: Color32::from_rgb(240, 244, 249),
-                panel_bg: Color32::from_rgb(249, 250, 252),
-                toolbar_bg: Color32::from_rgb(255, 255, 255),
-                canvas_bg: Color32::from_rgb(220, 226, 235),
-                card_bg: Color32::from_rgb(255, 255, 255),
-                control_bg: Color32::from_rgb(236, 241, 247),
-                control_hover: Color32::from_rgb(223, 230, 240),
-                border: Color32::from_rgb(211, 220, 232),
-                border_strong: Color32::from_rgb(163, 176, 196),
-                text_primary: Color32::from_rgb(15, 23, 42),
-                text_secondary: Color32::from_rgb(51, 65, 85),
-                text_muted: Color32::from_rgb(100, 116, 139),
-                accent_red: Color32::from_rgb(214, 42, 48),
-                accent_red_soft: Color32::from_rgba_unmultiplied(214, 42, 48, 30),
-                accent_cyan: Color32::from_rgb(2, 132, 199),
-                accent_amber: Color32::from_rgb(217, 119, 6),
-                accent_green: Color32::from_rgb(22, 163, 74),
+                window_bg: Color32::from_rgb(239, 228, 216),
+                panel_bg: Color32::from_rgb(249, 241, 231),
+                toolbar_bg: Color32::from_rgb(246, 235, 223),
+                canvas_bg: Color32::from_rgb(222, 204, 188),
+                card_bg: Color32::from_rgb(244, 231, 218),
+                control_bg: Color32::from_rgb(237, 221, 205),
+                control_hover: Color32::from_rgb(232, 208, 187),
+                border: Color32::from_rgb(215, 193, 174),
+                border_strong: Color32::from_rgb(171, 139, 116),
+                text_primary: Color32::from_rgb(48, 34, 28),
+                text_secondary: Color32::from_rgb(91, 65, 51),
+                text_muted: Color32::from_rgb(113, 84, 68),
+                accent_red: Color32::from_rgb(150, 63, 39),
+                accent_red_soft: Color32::from_rgb(241, 213, 197),
+                text_on_accent: Color32::from_rgb(255, 247, 238),
+                accent_cyan: Color32::from_rgb(41, 104, 88),
+                accent_amber: Color32::from_rgb(133, 76, 23),
+                accent_green: Color32::from_rgb(63, 105, 42),
             },
         }
     }
@@ -78,8 +81,8 @@ impl RedBimTheme {
         visuals.window_fill = self.panel_bg;
         visuals.extreme_bg_color = self.canvas_bg;
         visuals.faint_bg_color = self.card_bg;
-        visuals.selection.bg_fill = self.accent_red;
-        visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+        visuals.selection.bg_fill = self.accent_red_soft;
+        visuals.selection.stroke = Stroke::new(1.0, self.text_primary);
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_primary);
@@ -91,6 +94,17 @@ impl RedBimTheme {
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, self.text_primary);
         visuals.widgets.active.bg_fill = self.accent_red_soft;
         visuals.widgets.active.bg_stroke = Stroke::new(1.2, self.accent_red);
+        visuals.widgets.active.fg_stroke = Stroke::new(1.5, self.text_primary);
+        visuals.widgets.open = visuals.widgets.hovered;
+        for widget in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
+            widget.weak_bg_fill = widget.bg_fill;
+        }
         visuals.window_corner_radius = CornerRadius::same(8);
         visuals.menu_corner_radius = CornerRadius::same(7);
         visuals.widgets.inactive.corner_radius = CornerRadius::same(5);

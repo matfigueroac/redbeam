@@ -11,6 +11,7 @@ pub enum HandleKind {
     MeasureOffset,
     ArcMid,
     RectCorner(usize), // 0=TL, 1=TR, 2=BR, 3=BL
+    CloudCorner(usize),
     PointIndex(usize),
     CutoutPoint(usize, usize),
     CalloutTip,
@@ -42,6 +43,8 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
         | MarkupKind::Ellipse { rect }
         | MarkupKind::Stamp { rect, .. }
         | MarkupKind::Image { rect, .. }
+        | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. }
         | MarkupKind::SketchRect { rect, .. } => *rect,
         MarkupKind::Callout {
             arrow_tip,
@@ -50,7 +53,7 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
             ..
         } => {
             let mut r = *box_rect;
-            for p in [*arrow_tip, *knee] {
+            for p in [*arrow_tip, callout_landing(*box_rect, *knee).0] {
                 r.min_x = r.min_x.min(p.x);
                 r.min_y = r.min_y.min(p.y);
                 r.max_x = r.max_x.max(p.x);
@@ -58,31 +61,55 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
             }
             r
         }
-        MarkupKind::Cloud { points, .. }
-        | MarkupKind::Polyline { points }
+        MarkupKind::Cloud { points, .. } => {
+            let bulge = (m.style.cloud_arc_size as f64).clamp(6.0, 64.0) * 0.45;
+            Rect2::from_points(points)
+                .unwrap_or_default()
+                .expand(bulge)
+        }
+        MarkupKind::Polyline { points }
         | MarkupKind::Polygon { points }
         | MarkupKind::MeasurePolylength { points, .. }
         | MarkupKind::MeasurePerimeter { points, .. }
-        | MarkupKind::MeasureArea { points, .. }
-        | MarkupKind::MeasureVolume { points, .. }
         | MarkupKind::MeasureCount { points, .. }
         | MarkupKind::SketchPoly { points, .. } => Rect2::from_points(points).unwrap_or_default(),
+        MarkupKind::MeasureArea {
+            points, cutouts, ..
+        }
+        | MarkupKind::MeasureVolume {
+            points, cutouts, ..
+        } => {
+            let all: Vec<Point2> = points
+                .iter()
+                .copied()
+                .chain(cutouts.iter().flatten().copied())
+                .collect();
+            Rect2::from_points(&all).unwrap_or_default()
+        }
         MarkupKind::CloudPlus {
             cloud_points,
             knee,
             box_rect,
             ..
         } => {
-            let mut r = Rect2::from_points(cloud_points).unwrap_or(*box_rect);
+            let bulge = (m.style.cloud_arc_size as f64).clamp(6.0, 64.0) * 0.45;
+            let mut r = Rect2::from_points(cloud_points)
+                .map(|cr| cr.expand(bulge))
+                .unwrap_or(*box_rect);
             r.min_x = r.min_x.min(knee.x).min(box_rect.min_x);
             r.min_y = r.min_y.min(knee.y).min(box_rect.min_y);
             r.max_x = r.max_x.max(knee.x).max(box_rect.max_x);
             r.max_y = r.max_y.max(knee.y).max(box_rect.max_y);
             r
         }
-        MarkupKind::Line { start, end }
-        | MarkupKind::Arrow { start, end }
-        | MarkupKind::MeasureDiameter { p1: start, p2: end, .. } => Rect2::from_min_max(*start, *end),
+        MarkupKind::Line { start, end } | MarkupKind::Arrow { start, end } => {
+            Rect2::from_min_max(*start, *end)
+        }
+        MarkupKind::MeasureDiameter { p1, p2, .. } => {
+            let center = p1.midpoint(*p2);
+            let rad = p1.dist(*p2) * 0.5;
+            Rect2::from_xywh(center.x - rad, center.y - rad, rad * 2.0, rad * 2.0)
+        }
         MarkupKind::MeasureLength {
             start,
             end,
@@ -93,7 +120,8 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
             Rect2::from_points(&[*start, *end, da, db]).unwrap_or_default()
         }
         MarkupKind::Arc { start, mid, end } => {
-            Rect2::from_points(&[*start, *mid, *end]).unwrap_or_default()
+            let samples = crate::geometry::math::sample_three_point_arc(*start, *mid, *end, 16);
+            Rect2::from_points(&samples).unwrap_or_default()
         }
         MarkupKind::Ink { strokes } | MarkupKind::Highlight { strokes, .. } => {
             let all: Vec<Point2> = strokes.iter().flatten().copied().collect();
@@ -113,7 +141,12 @@ pub fn markup_bounds(m: &Markup) -> Rect2 {
 }
 
 pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
-    let bounds = markup_bounds(m).expand(tol_pt + 4.0);
+    let extra_pad = match &m.kind {
+        MarkupKind::MeasureCount { .. } | MarkupKind::Note { .. } => 12.0,
+        MarkupKind::Highlight { .. } => (m.style.line_width as f64 * 0.5).max(4.0),
+        _ => (m.style.line_width as f64 * 0.5).max(4.0),
+    };
+    let bounds = markup_bounds(m).expand(tol_pt + extra_pad);
     if !bounds.contains(pt) {
         return false;
     }
@@ -122,7 +155,9 @@ pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
         MarkupKind::Note { pos } => pt.dist(*pos) <= 12.0 + tol_pt,
         MarkupKind::TextBox { rect, .. }
         | MarkupKind::Stamp { rect, .. }
-        | MarkupKind::Image { rect, .. } => rect.expand(tol_pt).contains(pt),
+        | MarkupKind::Image { rect, .. }
+        | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. } => rect.expand(tol_pt).contains(pt),
         MarkupKind::Typewriter { .. } | MarkupKind::Legend { .. } => {
             markup_bounds(m).expand(tol_pt).contains(pt)
         }
@@ -132,9 +167,10 @@ pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
             box_rect,
             ..
         } => {
+            let (knee, anchor) = callout_landing(*box_rect, *knee);
             box_rect.expand(tol_pt).contains(pt)
-                || dist_point_to_segment(pt, *arrow_tip, *knee) <= tol_pt
-                || dist_point_to_segment(pt, *knee, box_rect_anchor(*box_rect, *knee)) <= tol_pt
+                || dist_point_to_segment(pt, *arrow_tip, knee) <= tol_pt
+                || dist_point_to_segment(pt, knee, anchor) <= tol_pt
         }
         MarkupKind::CloudPlus {
             cloud_points,
@@ -142,17 +178,22 @@ pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
             box_rect,
             ..
         } => {
+            let ctr = crate::geometry::math::polygon_centroid(cloud_points);
             box_rect.expand(tol_pt).contains(pt)
                 || hit_polygon_outline_or_fill(cloud_points, &[], pt, tol_pt, m.style.fill_color.is_some())
+                || dist_point_to_segment(pt, ctr, *knee) <= tol_pt
                 || dist_point_to_segment(pt, *knee, box_rect_anchor(*box_rect, *knee)) <= tol_pt
         }
         MarkupKind::Cloud { points, .. } => {
             hit_polygon_outline_or_fill(points, &[], pt, tol_pt, m.style.fill_color.is_some())
         }
-        MarkupKind::Line { start, end }
-        | MarkupKind::Arrow { start, end }
-        | MarkupKind::MeasureDiameter { p1: start, p2: end, .. } => {
+        MarkupKind::Line { start, end } | MarkupKind::Arrow { start, end } => {
             dist_point_to_segment(pt, *start, *end) <= tol_pt
+        }
+        MarkupKind::MeasureDiameter { p1, p2, .. } => {
+            let center = p1.midpoint(*p2);
+            let r = p1.dist(*p2) * 0.5;
+            dist_point_to_segment(pt, *p1, *p2) <= tol_pt || (pt.dist(center) - r).abs() <= tol_pt
         }
         MarkupKind::MeasureLength {
             start,
@@ -217,8 +258,12 @@ pub fn hit_test_markup(m: &Markup, pt: Point2, tol_pt: f64) -> bool {
                 tol_pt
             };
             strokes.iter().any(|s| {
-                s.windows(2)
-                    .any(|w| dist_point_to_segment(pt, w[0], w[1]) <= extra)
+                if s.len() == 1 {
+                    s[0].dist(pt) <= extra
+                } else {
+                    s.windows(2)
+                        .any(|w| dist_point_to_segment(pt, w[0], w[1]) <= extra)
+                }
             })
         }
         MarkupKind::MeasureAngle { p1, vertex, p2, .. } => {
@@ -245,6 +290,12 @@ pub fn box_rect_anchor(rect: Rect2, from: Point2) -> Point2 {
     }
 }
 
+pub fn callout_landing(rect: Rect2, knee: Point2) -> (Point2, Point2) {
+    let y = knee.y.clamp(rect.min_y, rect.max_y);
+    let side = box_rect_anchor(rect, knee).x;
+    (Point2::new(knee.x, y), Point2::new(side, y))
+}
+
 fn hit_polygon_outline_or_fill(
     points: &[Point2],
     cutouts: &[Vec<Point2>],
@@ -260,6 +311,15 @@ fn hit_polygon_outline_or_fill(
         let b = points[(i + 1) % points.len()];
         if dist_point_to_segment(pt, a, b) <= tol_pt {
             return true;
+        }
+    }
+    for hole in cutouts {
+        for i in 0..hole.len() {
+            let a = hole[i];
+            let b = hole[(i + 1) % hole.len()];
+            if dist_point_to_segment(pt, a, b) <= tol_pt {
+                return true;
+            }
         }
     }
     false
@@ -278,6 +338,8 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
         | MarkupKind::Ellipse { rect }
         | MarkupKind::Stamp { rect, .. }
         | MarkupKind::Image { rect, .. }
+        | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. }
         | MarkupKind::SketchRect { rect, .. } => {
             for (i, c) in rect.corners().iter().enumerate() {
                 out.push((HandleKind::RectCorner(i), *c));
@@ -290,7 +352,7 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
             ..
         } => {
             out.push((HandleKind::CalloutTip, *arrow_tip));
-            out.push((HandleKind::CalloutKnee, *knee));
+            out.push((HandleKind::CalloutKnee, callout_landing(*box_rect, *knee).0));
             for (i, c) in box_rect.corners().iter().enumerate() {
                 out.push((HandleKind::CalloutBoxCorner(i), *c));
             }
@@ -299,10 +361,16 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
             cloud_points,
             knee,
             box_rect,
+            is_rect,
             ..
         } => {
             for (i, p) in cloud_points.iter().enumerate() {
-                out.push((HandleKind::PointIndex(i), *p));
+                let handle = if *is_rect && cloud_points.len() == 4 {
+                    HandleKind::CloudCorner(i)
+                } else {
+                    HandleKind::PointIndex(i)
+                };
+                out.push((handle, *p));
             }
             out.push((HandleKind::CalloutKnee, *knee));
             for (i, c) in box_rect.corners().iter().enumerate() {
@@ -335,6 +403,11 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
             out.push((HandleKind::LineStart, *start));
             out.push((HandleKind::ArcMid, *mid));
             out.push((HandleKind::LineEnd, *end));
+        }
+        MarkupKind::Cloud { points, is_rect: true } if points.len() == 4 => {
+            for (i, p) in points.iter().enumerate() {
+                out.push((HandleKind::CloudCorner(i), *p));
+            }
         }
         MarkupKind::Cloud { points, .. }
         | MarkupKind::Polyline { points }
@@ -377,6 +450,14 @@ pub fn list_handles(m: &Markup) -> Vec<(HandleKind, Point2)> {
 }
 
 pub fn hit_test_handle(m: &Markup, pt: Point2, tol_pt: f64) -> Option<HandleKind> {
+    if matches!(m.kind, MarkupKind::Callout { .. }) {
+        return list_handles(m)
+            .into_iter()
+            .map(|(kind, pos)| (kind, pos.dist(pt)))
+            .filter(|(_, distance)| *distance <= tol_pt * 0.6)
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(kind, _)| kind);
+    }
     for (kind, pos) in list_handles(m) {
         if pos.dist(pt) <= tol_pt {
             return Some(kind);
@@ -406,9 +487,24 @@ pub fn is_measure_length_offset_drag_hit(m: &Markup, pt: Point2, tol_pt: f64) ->
         || pt.dist(pill_mid) <= (tol_pt * 2.5).max(16.0)
 }
 
-pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
+pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2, free_corner: bool) {
+    if m.locked {
+        return;
+    }
     m.modified_at = chrono::Utc::now();
     match (&mut m.kind, handle) {
+        (
+            MarkupKind::Cloud { points, is_rect: true }
+            | MarkupKind::CloudPlus { cloud_points: points, is_rect: true, .. },
+            HandleKind::CloudCorner(i),
+        ) if points.len() == 4 && i < 4 => {
+            if free_corner {
+                points[i] = new_pt;
+            } else {
+                let opposite = points[(i + 2) % 4];
+                points.copy_from_slice(&rect_from_corner(i, opposite, new_pt).corners());
+            }
+        }
         (
             MarkupKind::Note { pos }
             | MarkupKind::Typewriter { pos, .. }
@@ -423,6 +519,8 @@ pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
             | MarkupKind::Ellipse { rect }
             | MarkupKind::Stamp { rect, .. }
             | MarkupKind::Image { rect, .. }
+            | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. }
             | MarkupKind::SketchRect { rect, .. },
             HandleKind::RectCorner(corner),
         ) => {
@@ -438,8 +536,13 @@ pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
             h,
         ) => match h {
             HandleKind::CalloutTip => *arrow_tip = new_pt,
-            HandleKind::CalloutKnee => *knee = new_pt,
-            HandleKind::CalloutBoxCorner(c) => resize_rect_by_corner(box_rect, c, new_pt),
+            HandleKind::CalloutKnee => *knee = callout_landing(*box_rect, new_pt).0,
+            HandleKind::CalloutBoxCorner(c) => {
+                *knee = callout_landing(*box_rect, *knee).0;
+                let opposite = box_rect.corners()[(c + 2) % 4];
+                let y = if c < 2 { new_pt.y.min(knee.y) } else { new_pt.y.max(knee.y) };
+                *box_rect = rect_from_corner_with_minimum(c, opposite, Point2::new(new_pt.x, y), 54.0, 22.0);
+            }
             _ => {}
         },
         (
@@ -483,8 +586,12 @@ pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
             HandleKind::LineEnd => *end = new_pt,
             HandleKind::MeasureOffset => {
                 let d = *end - *start;
-                let len = d.len().max(1e-6);
-                let n = Point2::new(-d.y / len, d.x / len);
+                let len = d.len();
+                let n = if len <= 1e-6 {
+                    Point2::new(0.0, -1.0)
+                } else {
+                    Point2::new(-d.y / len, d.x / len)
+                };
                 *offset_pt = (new_pt - *start).dot(n);
             }
             _ => {}
@@ -551,13 +658,31 @@ pub fn apply_handle_drag(m: &mut Markup, handle: HandleKind, new_pt: Point2) {
 }
 
 fn resize_rect_by_corner(rect: &mut Rect2, corner: usize, new_pt: Point2) {
-    let opposite = match corner {
-        0 => Point2::new(rect.max_x, rect.max_y),
-        1 => Point2::new(rect.min_x, rect.max_y),
-        2 => Point2::new(rect.min_x, rect.min_y),
-        _ => Point2::new(rect.max_x, rect.min_y),
+    *rect = rect_from_corner(corner, rect.corners()[(corner + 2) % 4], new_pt);
+}
+
+fn rect_from_corner(corner: usize, opposite: Point2, new_pt: Point2) -> Rect2 {
+    rect_from_corner_with_minimum(corner, opposite, new_pt, 1.0, 1.0)
+}
+
+fn rect_from_corner_with_minimum(
+    corner: usize,
+    opposite: Point2,
+    new_pt: Point2,
+    min_width: f64,
+    min_height: f64,
+) -> Rect2 {
+    let x = if matches!(corner, 0 | 3) {
+        new_pt.x.min(opposite.x - min_width)
+    } else {
+        new_pt.x.max(opposite.x + min_width)
     };
-    *rect = Rect2::from_min_max(opposite, new_pt);
+    let y = if matches!(corner, 0 | 1) {
+        new_pt.y.min(opposite.y - min_height)
+    } else {
+        new_pt.y.max(opposite.y + min_height)
+    };
+    Rect2::from_min_max(opposite, Point2::new(x, y))
 }
 
 pub fn translate_markup(m: &mut Markup, delta: Point2) {
@@ -576,6 +701,8 @@ pub fn translate_markup(m: &mut Markup, delta: Point2) {
         | MarkupKind::Ellipse { rect }
         | MarkupKind::Stamp { rect, .. }
         | MarkupKind::Image { rect, .. }
+        | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. }
         | MarkupKind::SketchRect { rect, .. } => {
             *rect = rect.translate(delta);
         }
@@ -691,12 +818,53 @@ mod tests {
         assert!(hit_test_markup(&m, Point2::new(120.0, 90.0), 6.0));
         let h = hit_test_handle(&m, Point2::new(101.0, 99.0), 6.0).unwrap();
         assert_eq!(h, HandleKind::CalloutTip);
-        apply_handle_drag(&mut m, h, Point2::new(50.0, 50.0));
+        apply_handle_drag(&mut m, h, Point2::new(50.0, 50.0), false);
         if let MarkupKind::Callout { arrow_tip, .. } = m.kind {
             assert_eq!(arrow_tip, Point2::new(50.0, 50.0));
         } else {
             panic!("wrong kind");
         }
+    }
+
+    #[test]
+    fn rectangular_cloud_resizes_as_one_shape_and_allows_free_editing() {
+        let rect = Rect2::from_xywh(10.0, 20.0, 90.0, 60.0);
+        let mut markup = Markup::new(0, "Nube", "Autor", MarkupStyle::default(), MarkupKind::Cloud {
+            points: rect.corners().to_vec(),
+            is_rect: true,
+        });
+        let corner = HandleKind::CloudCorner(0);
+        assert_eq!(hit_test_handle(&markup, rect.min(), 1.0), Some(corner));
+        let moved = Point2::new(30.0, 40.0);
+        apply_handle_drag(&mut markup, corner, moved, true);
+        let mut expected = rect.corners();
+        expected[0] = moved;
+        assert_eq!(list_handles(&markup).into_iter().map(|(_, p)| p).collect::<Vec<_>>(), expected);
+
+        apply_handle_drag(&mut markup, corner, moved, false);
+        let MarkupKind::Cloud { points, .. } = &markup.kind else { unreachable!() };
+        assert_eq!(*points, Rect2::from_min_max(moved, rect.max()).corners());
+    }
+
+    #[test]
+    fn cloud_plus_resizing_preserves_its_label_and_opposite_corner() {
+        let cloud = Rect2::from_xywh(10.0, 20.0, 90.0, 60.0);
+        let label = Rect2::from_xywh(120.0, 30.0, 100.0, 40.0);
+        let leader = Point2::new(112.0, 50.0);
+        let mut markup = Markup::new(0, "Nube+", "Autor", MarkupStyle::default(), MarkupKind::CloudPlus {
+            cloud_points: cloud.corners().to_vec(),
+            is_rect: true,
+            knee: leader,
+            box_rect: label,
+            text: "Revisar".into(),
+        });
+        let corner = HandleKind::CloudCorner(2);
+        apply_handle_drag(&mut markup, corner, Point2::new(4.0, 8.0), false);
+        apply_handle_drag(&mut markup, corner, Point2::new(160.0, 100.0), false);
+        let MarkupKind::CloudPlus { cloud_points, knee, box_rect, .. } = &markup.kind else { unreachable!() };
+        assert_eq!(*cloud_points, Rect2::from_xywh(10.0, 20.0, 150.0, 80.0).corners());
+        assert_eq!(*knee, leader);
+        assert_eq!(*box_rect, label);
     }
 
     #[test]

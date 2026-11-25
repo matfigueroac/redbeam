@@ -48,11 +48,16 @@ pub enum IconKind {
     Cutout,
     SketchScale,
     Viewport,
+    Hyperlink,
+    Space,
     ToolChest,
     Thumbnails,
     Layers,
     Bookmarks,
     Properties,
+    Duplicate,
+    Lock,
+    Trash,
     Measurements,
     Search,
     MarkupsList,
@@ -104,6 +109,10 @@ impl IconKind {
             ActiveTool::CutoutPoly => Self::Cutout,
             ActiveTool::SketchRect | ActiveTool::SketchPoly => Self::SketchScale,
             ActiveTool::ViewportRegion => Self::Viewport,
+            ActiveTool::Hyperlink => Self::Hyperlink,
+            ActiveTool::Space => Self::Space,
+            ActiveTool::VisualSearch => Self::Search,
+            ActiveTool::Redaction => Self::Rectangle,
         }
     }
 }
@@ -117,7 +126,14 @@ pub fn icon_button(
     tooltip: &str,
     theme: &RedBimTheme,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), sense);
+    let enabled = enabled && ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, active, tooltip));
     if ui.is_rect_visible(rect) {
         let hover_t = ui
             .ctx()
@@ -151,6 +167,8 @@ pub fn icon_button(
 
         let border = if !enabled {
             Stroke::NONE
+        } else if resp.has_focus() {
+            Stroke::new(2.0, theme.text_primary)
         } else if active_t > 0.05 {
             Stroke::new(
                 1.1,
@@ -286,16 +304,11 @@ pub fn paint_icon(painter: &Painter, r: Rect, kind: IconKind, fg: Color32, accen
             painter.line_segment([p(0.64, 0.59), p(0.82, 0.42)], st);
         }
         IconKind::Select => {
-            let pts = vec![
-                p(0.26, 0.12),
-                p(0.26, 0.80),
-                p(0.44, 0.64),
-                p(0.58, 0.88),
-                p(0.68, 0.82),
-                p(0.54, 0.58),
-                p(0.76, 0.56),
-            ];
-            painter.add(egui::Shape::convex_polygon(pts, fg, Stroke::NONE));
+            // Split concave pointer cursor into two convex shapes (head triangle + stem quad)
+            let head = vec![p(0.24, 0.12), p(0.24, 0.78), p(0.76, 0.56)];
+            let stem = vec![p(0.42, 0.58), p(0.54, 0.54), p(0.68, 0.84), p(0.56, 0.89)];
+            painter.add(egui::Shape::convex_polygon(head, fg, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(stem, fg, Stroke::NONE));
         }
         IconKind::Pan => {
             for dx in [-0.18, -0.05, 0.08, 0.21] {
@@ -551,6 +564,33 @@ pub fn paint_icon(painter: &Painter, r: Rect, kind: IconKind, fg: Color32, accen
             let pts = vec![p(0.24, 0.14), p(0.76, 0.14), p(0.76, 0.86), p(0.50, 0.66), p(0.24, 0.86)];
             painter.add(egui::Shape::closed_line(pts, st));
         }
+        IconKind::Duplicate => {
+            painter.line_segment([p(0.52, 0.15), p(0.15, 0.15)], st);
+            painter.line_segment([p(0.15, 0.15), p(0.15, 0.59)], st);
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.36, 0.35), p(0.86, 0.86)),
+                CornerRadius::same(2), st, egui::StrokeKind::Inside,
+            );
+        }
+        IconKind::Lock => {
+            painter.add(egui::Shape::line(
+                vec![p(0.31, 0.47), p(0.31, 0.29), p(0.39, 0.17), p(0.61, 0.17), p(0.69, 0.29), p(0.69, 0.47)],
+                st,
+            ));
+            painter.rect_stroke(
+                Rect::from_min_max(p(0.22, 0.47), p(0.78, 0.86)),
+                CornerRadius::same(2), st, egui::StrokeKind::Inside,
+            );
+        }
+        IconKind::Trash => {
+            painter.line_segment([p(0.17, 0.28), p(0.83, 0.28)], st);
+            painter.line_segment([p(0.39, 0.14), p(0.61, 0.14)], st);
+            painter.add(egui::Shape::line(
+                vec![p(0.27, 0.35), p(0.32, 0.85), p(0.68, 0.85), p(0.73, 0.35)],
+                st,
+            ));
+            painter.line_segment([p(0.50, 0.43), p(0.50, 0.73)], st_thin);
+        }
         IconKind::Properties => {
             for fy in [0.28, 0.50, 0.72] {
                 painter.line_segment([p(0.16, fy), p(0.84, fy)], st_thin);
@@ -618,6 +658,22 @@ pub fn paint_icon(painter: &Painter, r: Rect, kind: IconKind, fg: Color32, accen
         IconKind::ThemeToggle => {
             painter.circle_stroke(c, w * 0.26, st);
             painter.circle_filled(p(0.45, 0.5), w * 0.12, fg);
+        }
+        IconKind::Hyperlink => {
+            let left = Rect::from_min_max(p(0.14, 0.34), p(0.56, 0.66));
+            let right = Rect::from_min_max(p(0.44, 0.34), p(0.86, 0.66));
+            painter.rect_stroke(left, CornerRadius::same(5), st_acc, egui::StrokeKind::Inside);
+            painter.rect_stroke(right, CornerRadius::same(5), st, egui::StrokeKind::Inside);
+            painter.line_segment([p(0.38, 0.50), p(0.62, 0.50)], st_acc);
+        }
+        IconKind::Space => {
+            let pts = vec![p(0.16, 0.22), p(0.84, 0.22), p(0.84, 0.78), p(0.46, 0.78), p(0.46, 0.54), p(0.16, 0.54)];
+            painter.add(egui::Shape::closed_line(pts, st_acc));
+            painter.rect_filled(
+                Rect::from_min_max(p(0.24, 0.30), p(0.76, 0.48)),
+                CornerRadius::same(1),
+                accent.gamma_multiply(0.25),
+            );
         }
     }
 }

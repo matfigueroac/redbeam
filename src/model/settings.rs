@@ -37,6 +37,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_left_panel_width() -> f32 {
+    204.0
+}
+
+fn default_right_panel_width() -> f32 {
+    275.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: ThemeMode,
@@ -61,10 +69,10 @@ pub struct AppSettings {
     pub panel_left_open: bool,
     #[serde(default = "default_true")]
     pub panel_right_open: bool,
-    #[serde(default = "default_true")]
-    pub panel_bottom_open: bool,
-    #[serde(default)]
-    pub panel_dpt_open: bool,
+    #[serde(default = "default_left_panel_width")]
+    pub panel_left_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    pub panel_right_width: f32,
     pub recent_files: Vec<PathBuf>,
 }
 
@@ -93,8 +101,8 @@ impl Default for AppSettings {
             compact_tool_chest: false,
             panel_left_open: true,
             panel_right_open: true,
-            panel_bottom_open: true,
-            panel_dpt_open: false,
+            panel_left_width: default_left_panel_width(),
+            panel_right_width: default_right_panel_width(),
             recent_files: Vec::new(),
         }
     }
@@ -122,7 +130,7 @@ impl AppSettings {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = std::fs::write(path, json);
+                let _ = crate::storage::atomic_write_file(&path, json.as_bytes());
             }
         }
     }

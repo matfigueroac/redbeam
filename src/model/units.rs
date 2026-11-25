@@ -384,6 +384,9 @@ pub fn format_number_dec(val: f64, decimals: usize) -> String {
 
 /// Formats an inch value as `whole num/den"` (e.g. `6 1/2"`).
 pub fn format_fractional_inches(inches: f64, denom: u32) -> String {
+    if !inches.is_finite() || denom == 0 {
+        return "0\"".to_string();
+    }
     let sign = if inches < 0.0 { "-" } else { "" };
     let abs_in = inches.abs();
     let total_ticks = (abs_in * denom as f64).round() as u64;
@@ -405,6 +408,9 @@ pub fn format_fractional_inches(inches: f64, denom: u32) -> String {
 
 /// Formats a feet value in American architectural style `12'-6 1/2"`.
 pub fn format_feet_inches(feet_total: f64, precision: Precision) -> String {
+    if !feet_total.is_finite() {
+        return "0'-0\"".to_string();
+    }
     let sign = if feet_total < 0.0 { "-" } else { "" };
     let total_inches = feet_total.abs() * 12.0;
     let denom = precision.denominator().unwrap_or(16);

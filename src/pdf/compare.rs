@@ -44,6 +44,9 @@ pub fn compare_pdf_pages(
 
     let w = img_a.width;
     let h = img_a.height;
+    if w == 0 || h == 0 || img_b.width == 0 || img_b.height == 0 {
+        return Err("La página seleccionada no contiene píxeles válidos para comparar.".to_string());
+    }
     let mut rgb = vec![255u8; w * h * 3];
 
     let cell_px = (w.max(h) / 48).max(16);
@@ -53,27 +56,40 @@ pub fn compare_pdf_pages(
     let mut added_pixels = 0usize;
     let mut removed_pixels = 0usize;
 
-    let sample_ink = |img: &crate::pdf::renderer::RgbaImageData, x: usize, y: usize| -> bool {
+    let sample_rgb = |img: &crate::pdf::renderer::RgbaImageData, x: usize, y: usize| -> (u8, u8, u8) {
         let sx = (x * img.width / w.max(1)).min(img.width.saturating_sub(1));
         let sy = (y * img.height / h.max(1)).min(img.height.saturating_sub(1));
         let off = (sy * img.width + sx) * 4;
-        let r = img.premul_rgba[off] as f32;
-        let g = img.premul_rgba[off + 1] as f32;
-        let b = img.premul_rgba[off + 2] as f32;
-        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        lum < 236.0
+        (
+            img.premul_rgba[off],
+            img.premul_rgba[off + 1],
+            img.premul_rgba[off + 2],
+        )
     };
 
     for y in 0..h {
         for x in 0..w {
-            let ink_a = sample_ink(&img_a, x, y);
-            let ink_b = sample_ink(&img_b, x, y);
+            let (ra, ga, ba) = sample_rgb(&img_a, x, y);
+            let (rb, gb, bb) = sample_rgb(&img_b, x, y);
+            let lum_a = 0.299 * ra as f32 + 0.587 * ga as f32 + 0.114 * ba as f32;
+            let lum_b = 0.299 * rb as f32 + 0.587 * gb as f32 + 0.114 * bb as f32;
+            let ink_a = lum_a < 242.0;
+            let ink_b = lum_b < 242.0;
+            let ch_delta = ra.abs_diff(rb).max(ga.abs_diff(gb)).max(ba.abs_diff(bb));
             let dst = (y * w + x) * 3;
             match (ink_a, ink_b) {
-                (true, true) => {
+                (true, true) if ch_delta <= 32 => {
                     rgb[dst] = 148;
                     rgb[dst + 1] = 154;
                     rgb[dst + 2] = 166;
+                }
+                (true, true) => {
+                    // Color/shading changed between revisions -> Purple-Blue highlight
+                    rgb[dst] = 124;
+                    rgb[dst + 1] = 58;
+                    rgb[dst + 2] = 237;
+                    added_pixels += 1;
+                    diff_counts[(y / cell_px) * cols + (x / cell_px)] += 1;
                 }
                 (true, false) => {
                     // Removed from A -> Crimson Red

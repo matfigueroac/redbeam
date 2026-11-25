@@ -1,6 +1,6 @@
 use crate::model::document::DocumentTab;
 use crate::model::markup::{
-    CountStyle, HatchPattern, LineEnd, LineStyle, Markup, MarkupKind, MarkupStyle,
+    CountStyle, HatchPattern, LineEnd, LineStyle, MarkupStyle,
     MeasurementOptions, NoteIcon,
 };
 use crate::model::settings::CsvDelimiter;
@@ -8,6 +8,7 @@ use crate::model::tool_chest::ActiveTool;
 use crate::model::units::LengthUnit;
 use crate::ui::actions::UiAction;
 use crate::ui::icons::{IconKind, icon_button};
+use crate::ui::menu_bar::PanelVisibility;
 use crate::ui::theme::RedBimTheme;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
 
@@ -29,8 +30,8 @@ fn toolbar_group(
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     egui::Frame::new()
-        .fill(theme.card_bg.gamma_multiply(0.75))
-        .stroke(Stroke::new(1.0, theme.border.gamma_multiply(0.7)))
+        .fill(theme.card_bg)
+        .stroke(Stroke::new(1.0, theme.border))
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::symmetric(4, 2))
         .show(ui, |ui| {
@@ -41,6 +42,7 @@ fn toolbar_group(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_dropdown_group(
     ui: &mut egui::Ui,
     id: &str,
@@ -73,9 +75,6 @@ fn tool_dropdown_group(
 
     let resp = ui.add_enabled(has_doc, btn).on_hover_text(tooltip);
     let popup_id = ui.make_persistent_id(id);
-    if resp.clicked() {
-        egui::Popup::toggle_id(ui.ctx(), popup_id);
-    }
     egui::Popup::from_toggle_button_response(&resp)
         .id(popup_id)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
@@ -93,16 +92,20 @@ fn tool_dropdown_group(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_main_toolbar(
     ui: &mut egui::Ui,
-    tab: Option<&DocumentTab>,
+    tab: Option<&mut DocumentTab>,
     active_tool: ActiveTool,
+    default_style: &mut MarkupStyle,
+    default_meas_opts: &mut MeasurementOptions,
+    panels: &mut PanelVisibility,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
     let has_doc = tab.is_some();
-    let can_undo = tab.is_some_and(|t| !t.undo_stack.is_empty());
-    let can_redo = tab.is_some_and(|t| !t.redo_stack.is_empty());
+    let can_undo = tab.as_ref().is_some_and(|t| !t.undo_stack.is_empty());
+    let can_redo = tab.as_ref().is_some_and(|t| !t.redo_stack.is_empty());
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
@@ -129,9 +132,6 @@ pub fn draw_main_toolbar(
                 )
                 .on_hover_text("Más opciones de archivo y exportación");
             let file_popup_id = ui.make_persistent_id("tb_file_more");
-            if file_more_resp.clicked() {
-                egui::Popup::toggle_id(ui.ctx(), file_popup_id);
-            }
             egui::Popup::from_toggle_button_response(&file_more_resp)
                 .id(file_popup_id)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
@@ -244,6 +244,8 @@ pub fn draw_main_toolbar(
                     ActiveTool::Image,
                     ActiveTool::Legend,
                     ActiveTool::Snapshot,
+                    ActiveTool::Hyperlink,
+                    ActiveTool::Redaction,
                 ],
                 active_tool,
                 has_doc,
@@ -290,7 +292,7 @@ pub fn draw_main_toolbar(
             tool_dropdown_group(
                 ui,
                 "tb_more_measure",
-                "Más mediciones (Polilongitud, Volumen, Ángulo, Radio, Diámetro, Recorte, Viewport)",
+                "Más mediciones (Polilongitud, Volumen, Ángulo, Radio, Diámetro, Recorte, Viewport, Espacio, Búsqueda visual)",
                 &[
                     ActiveTool::MeasurePolylength,
                     ActiveTool::MeasureVolume,
@@ -299,6 +301,8 @@ pub fn draw_main_toolbar(
                     ActiveTool::MeasureDiameter,
                     ActiveTool::CutoutPoly,
                     ActiveTool::ViewportRegion,
+                    ActiveTool::Space,
+                    ActiveTool::VisualSearch,
                 ],
                 active_tool,
                 has_doc,
@@ -306,30 +310,47 @@ pub fn draw_main_toolbar(
                 actions,
             );
         });
+
+        toolbar_group(ui, theme, |ui| {
+            let style = ui
+                .add_enabled(has_doc, egui::Button::new("Estilo ▾").min_size(egui::vec2(0.0, 26.0)))
+                .on_hover_text("Color, relleno y estilo de la herramienta o marca seleccionada");
+            if let Some(tab) = tab {
+                egui::Popup::from_toggle_button_response(&style)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .width(330.0)
+                    .gap(6.0)
+                    .show(|ui| {
+                        draw_style_controls(
+                            ui, tab, active_tool, default_style, default_meas_opts, theme, actions,
+                        );
+                    });
+            }
+            if ui
+                .add_enabled(
+                    has_doc,
+                    egui::Button::new("Marcas")
+                        .selected(panels.markups_open)
+                        .min_size(egui::vec2(0.0, 26.0)),
+                )
+                .on_hover_text("Lista de marcas (F8)")
+                .clicked()
+            {
+                panels.markups_open = !panels.markups_open;
+            }
+        });
     });
 }
 
-/// Dynamic Properties Toolbar directly below the main toolbar (mirrors Bluebeam's DPT).
-pub fn draw_dynamic_properties_bar(
+fn draw_style_controls(
     ui: &mut egui::Ui,
-    tab: Option<&mut DocumentTab>,
+    tab: &mut DocumentTab,
     active_tool: ActiveTool,
     default_style: &mut MarkupStyle,
     default_meas_opts: &mut MeasurementOptions,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
-    let Some(tab) = tab else {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Listo · Abra un plano PDF o el plano de ejemplo chileno (1:100) para comenzar.")
-                    .size(11.5)
-                    .color(theme.text_muted),
-            );
-        });
-        return;
-    };
-
     let selected_ids = tab.selected_ids.clone();
     let has_selection = !selected_ids.is_empty();
 
@@ -348,6 +369,7 @@ pub fn draw_dynamic_properties_bar(
         .map(|m| ActiveTool::from_markup_kind(&m.kind))
         .unwrap_or(active_tool);
 
+    let orig_style = style.clone();
     let mut style_dirty = false;
     let mut meas_dirty = false;
     let mut meas_opts = selected_ids
@@ -355,6 +377,7 @@ pub fn draw_dynamic_properties_bar(
         .and_then(|id| tab.markups.iter().find(|m| m.id == *id))
         .and_then(|m| m.measurement_opts().cloned())
         .unwrap_or_else(|| default_meas_opts.clone());
+    let orig_meas_opts = meas_opts.clone();
 
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -661,14 +684,82 @@ pub fn draw_dynamic_properties_bar(
 
     if style_dirty {
         if has_selection {
-            tab.push_undo();
-            for m in &mut tab.markups {
-                if selected_ids.contains(&m.id) && !m.locked {
-                    m.style = style.clone();
-                    m.modified_at = chrono::Utc::now();
+            let locked_layers: std::collections::HashSet<String> = tab
+                .layers
+                .iter()
+                .filter(|l| l.locked)
+                .map(|l| l.name.clone())
+                .collect();
+            let any_unlocked = tab
+                .markups
+                .iter()
+                .any(|m| selected_ids.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer));
+            if any_unlocked {
+                tab.push_undo();
+                for m in &mut tab.markups {
+                    if selected_ids.contains(&m.id)
+                        && !m.locked
+                        && !locked_layers.contains(&m.layer)
+                    {
+                        if style.stroke_color != orig_style.stroke_color {
+                            m.style.stroke_color = style.stroke_color;
+                        }
+                        if style.text_color != orig_style.text_color {
+                            m.style.text_color = style.text_color;
+                        }
+                        if style.fill_color != orig_style.fill_color {
+                            m.style.fill_color = style.fill_color;
+                        }
+                        if (style.opacity - orig_style.opacity).abs() > 1e-4 {
+                            m.style.opacity = style.opacity;
+                        }
+                        if (style.fill_opacity - orig_style.fill_opacity).abs() > 1e-4 {
+                            m.style.fill_opacity = style.fill_opacity;
+                        }
+                        if (style.line_width - orig_style.line_width).abs() > 1e-4 {
+                            m.style.line_width = style.line_width;
+                        }
+                        if style.line_style != orig_style.line_style {
+                            m.style.line_style = style.line_style;
+                        }
+                        if (style.cloud_arc_size - orig_style.cloud_arc_size).abs() > 1e-4 {
+                            m.style.cloud_arc_size = style.cloud_arc_size;
+                        }
+                        if style.hatch != orig_style.hatch {
+                            m.style.hatch = style.hatch;
+                        }
+                        if style.start_end != orig_style.start_end {
+                            m.style.start_end = style.start_end;
+                        }
+                        if style.end_end != orig_style.end_end {
+                            m.style.end_end = style.end_end;
+                        }
+                        if (style.font_size - orig_style.font_size).abs() > 1e-4 {
+                            m.style.font_size = style.font_size;
+                        }
+                        if style.bold != orig_style.bold {
+                            m.style.bold = style.bold;
+                        }
+                        if style.italic != orig_style.italic {
+                            m.style.italic = style.italic;
+                        }
+                        if style.align != orig_style.align {
+                            m.style.align = style.align;
+                        }
+                        if style.box_shape != orig_style.box_shape {
+                            m.style.box_shape = style.box_shape;
+                        }
+                        if style.note_icon != orig_style.note_icon {
+                            m.style.note_icon = style.note_icon;
+                        }
+                        if style.count_style != orig_style.count_style {
+                            m.style.count_style = style.count_style;
+                        }
+                        m.modified_at = chrono::Utc::now();
+                    }
                 }
+                actions.push(UiAction::MarkupsStyleChanged);
             }
-            actions.push(UiAction::MarkupsStyleChanged);
         } else {
             *default_style = style;
         }
@@ -676,14 +767,62 @@ pub fn draw_dynamic_properties_bar(
 
     if meas_dirty {
         if has_selection {
-            tab.push_undo();
-            for m in &mut tab.markups {
-                if selected_ids.contains(&m.id)
+            let locked_layers: std::collections::HashSet<String> = tab
+                .layers
+                .iter()
+                .filter(|l| l.locked)
+                .map(|l| l.name.clone())
+                .collect();
+            let any_unlocked = tab.markups.iter().any(|m| {
+                selected_ids.contains(&m.id)
                     && !m.locked
-                    && let Some(o) = m.measurement_opts_mut()
-                {
-                    *o = meas_opts.clone();
-                    m.modified_at = chrono::Utc::now();
+                    && !locked_layers.contains(&m.layer)
+                    && m.measurement_opts().is_some()
+            });
+            if any_unlocked {
+                tab.push_undo();
+                for m in &mut tab.markups {
+                    if selected_ids.contains(&m.id)
+                        && !m.locked
+                        && !locked_layers.contains(&m.layer)
+                        && let Some(o) = m.measurement_opts_mut()
+                    {
+                        if o.show_caption != meas_opts.show_caption
+                            && meas_opts.show_caption != orig_meas_opts.show_caption
+                        {
+                            o.show_caption = meas_opts.show_caption;
+                        }
+                        if meas_opts.show_segments != orig_meas_opts.show_segments {
+                            o.show_segments = meas_opts.show_segments;
+                        }
+                        if meas_opts.show_centroid != orig_meas_opts.show_centroid {
+                            o.show_centroid = meas_opts.show_centroid;
+                        }
+                        if (meas_opts.depth_meters - orig_meas_opts.depth_meters).abs() > 1e-6 {
+                            o.depth_meters = meas_opts.depth_meters;
+                        }
+                        if (meas_opts.rise_drop_meters - orig_meas_opts.rise_drop_meters).abs()
+                            > 1e-6
+                        {
+                            o.rise_drop_meters = meas_opts.rise_drop_meters;
+                        }
+                        if meas_opts.length_unit_override != orig_meas_opts.length_unit_override {
+                            o.length_unit_override = meas_opts.length_unit_override;
+                        }
+                        if meas_opts.area_unit_override != orig_meas_opts.area_unit_override {
+                            o.area_unit_override = meas_opts.area_unit_override;
+                        }
+                        if meas_opts.volume_unit_override != orig_meas_opts.volume_unit_override {
+                            o.volume_unit_override = meas_opts.volume_unit_override;
+                        }
+                        if meas_opts.slope_format_override != orig_meas_opts.slope_format_override {
+                            o.slope_format_override = meas_opts.slope_format_override;
+                        }
+                        if meas_opts.precision_override != orig_meas_opts.precision_override {
+                            o.precision_override = meas_opts.precision_override;
+                        }
+                        m.modified_at = chrono::Utc::now();
+                    }
                 }
             }
         } else {
@@ -697,22 +836,24 @@ pub fn apply_tool_item_to_selection(tab: &mut DocumentTab, item_style: &MarkupSt
     if ids.is_empty() {
         return;
     }
+    let locked_layers: std::collections::HashSet<String> = tab
+        .layers
+        .iter()
+        .filter(|l| l.locked)
+        .map(|l| l.name.clone())
+        .collect();
+    let any_unlocked = tab
+        .markups
+        .iter()
+        .any(|m| ids.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer));
+    if !any_unlocked {
+        return;
+    }
     tab.push_undo();
     for m in &mut tab.markups {
-        if ids.contains(&m.id) && !m.locked {
+        if ids.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer) {
             m.style = item_style.clone();
             m.modified_at = chrono::Utc::now();
         }
     }
-}
-
-#[allow(dead_code)]
-fn _is_text_markup(m: &Markup) -> bool {
-    matches!(
-        m.kind,
-        MarkupKind::TextBox { .. }
-            | MarkupKind::Typewriter { .. }
-            | MarkupKind::Callout { .. }
-            | MarkupKind::CloudPlus { .. }
-    )
 }

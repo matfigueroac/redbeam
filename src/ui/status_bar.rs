@@ -12,23 +12,11 @@ pub fn draw_status_bar(
     tab: Option<&DocumentTab>,
     active_tool: ActiveTool,
     settings: &mut AppSettings,
-    bottom_open: &mut bool,
     theme: &RedBimTheme,
     actions: &mut Vec<UiAction>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-
-        // Toggle Markups List
-        let list_btn = ui.selectable_label(
-            *bottom_open,
-            RichText::new("Lista de marcas").size(11.5),
-        );
-        if list_btn.clicked() {
-            *bottom_open = !*bottom_open;
-        }
-
-        ui.separator();
 
         if let Some(tab) = tab {
             let split = tab.split_mode;
@@ -57,6 +45,17 @@ pub fn draw_status_bar(
             .clicked()
             {
                 actions.push(UiAction::ToggleSplitHorizontal);
+            }
+            if split != SplitViewMode::None {
+                let sync_btn = ui
+                    .selectable_label(
+                        tab.sync_split_views,
+                        RichText::new("🔗 Sinc.").size(11.0),
+                    )
+                    .on_hover_text("Sincronizar desplazamiento y zoom entre paneles divididos");
+                if sync_btn.clicked() {
+                    actions.push(UiAction::ToggleSyncSplitViews);
+                }
             }
             if icon_button(
                 ui,
@@ -138,7 +137,7 @@ pub fn draw_status_bar(
 
             ui.separator();
 
-            // Page navigation
+            // Page navigation (direct sheet jump + prev/next)
             let cur_page = tab.active_page_index();
             let total_pages = tab.pages.len();
             if ui
@@ -148,10 +147,38 @@ pub fn draw_status_bar(
             {
                 actions.push(UiAction::GoToPage(cur_page - 1));
             }
+            let page_input_id = ui.make_persistent_id(("sb_page_input", tab.id));
+            let mut page_buf: String = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<String>(page_input_id))
+                .unwrap_or_else(|| (cur_page + 1).to_string());
+            let mut is_focused = false;
+            let resp = ui
+                .add(
+                    egui::TextEdit::singleline(&mut page_buf)
+                        .id(page_input_id)
+                        .desired_width(34.0),
+                )
+                .on_hover_text("Escriba número de lámina y presione Enter");
+            if resp.has_focus() {
+                is_focused = true;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Ok(p) = page_buf.trim().parse::<usize>()
+                    && p >= 1
+                    && p <= total_pages
+                {
+                    actions.push(UiAction::GoToPage(p - 1));
+                }
+                page_buf = (cur_page + 1).to_string();
+            } else if !is_focused {
+                page_buf = (cur_page + 1).to_string();
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(page_input_id, page_buf));
             ui.label(
-                RichText::new(format!("{} de {}", cur_page + 1, total_pages))
+                RichText::new(format!("/ {total_pages}"))
                     .size(11.5)
-                    .strong(),
+                    .color(theme.text_secondary),
             );
             if ui
                 .add_enabled(cur_page + 1 < total_pages, egui::Button::new("▶"))
@@ -159,6 +186,31 @@ pub fn draw_status_bar(
                 .clicked()
             {
                 actions.push(UiAction::GoToPage(cur_page + 1));
+            }
+            if let Some(page) = tab.active_page() {
+                let lbl_text = page
+                    .label
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("Etiqueta...");
+                let lbl_color = if page.label.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                    theme.text_primary
+                } else {
+                    theme.text_muted
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(lbl_text).size(11.0).color(lbl_color))
+                            .fill(theme.control_bg)
+                            .corner_radius(CornerRadius::same(4)),
+                    )
+                    .on_hover_text("Etiqueta de lámina (clic para editar, ej: ARQ-01 · Planta Cubierta)")
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenDialog(DialogRequest::EditPageLabel {
+                        page_index: cur_page,
+                    }));
+                }
             }
 
             // Right-aligned Chilean scale, sheet dimensions in mm, snaps & reuse
@@ -301,7 +353,7 @@ pub fn draw_status_bar(
             });
         } else {
             ui.label(
-                RichText::new("RedBIM · Enfoque Métrico Chile (m / cm / mm) + Medidas EE.UU.")
+                RichText::new("Arrastre uno o más PDF a esta ventana para abrirlos.")
                     .size(11.5)
                     .color(theme.text_muted),
             );

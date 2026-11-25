@@ -1,5 +1,5 @@
 use crate::model::tool_chest::{ToolChest, ToolChestItem};
-use crate::ui::actions::UiAction;
+use crate::ui::actions::{DialogRequest, UiAction};
 use crate::ui::icons::paint_tool_chest_preview;
 use crate::ui::theme::RedBimTheme;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Stroke, Vec2};
@@ -16,12 +16,19 @@ pub fn draw_tool_chest_panel(
     let mut compact_toggled = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let search_w = (ui.available_width() - 56.0).max(80.0);
+        let search_w = (ui.available_width() - 92.0).max(48.0);
         ui.add(
             egui::TextEdit::singleline(search)
                 .hint_text("Buscar símbolo...")
                 .desired_width(search_w),
         );
+        if ui
+            .small_button("📥")
+            .on_hover_text("Importar conjunto de herramientas (.redbim-tools.json)")
+            .clicked()
+        {
+            actions.push(UiAction::ImportToolSet);
+        }
         let lbl = if *compact { "⊞" } else { "⊟" };
         if ui
             .small_button(lbl)
@@ -52,9 +59,12 @@ pub fn draw_tool_chest_panel(
     egui::ScrollArea::vertical()
         .id_salt("tool_chest_scroll")
         .show(ui, |ui| {
+            let mut remove_set_idx: Option<usize> = None;
             for set_idx in 0..chest.sets.len() {
+                let set_id = chest.sets[set_idx].id;
                 let title = chest.sets[set_idx].title.clone();
                 let is_my = chest.sets[set_idx].is_my_tools;
+                let is_recents = chest.sets[set_idx].is_recents;
                 let collapsed = chest.sets[set_idx].collapsed;
                 let item_count = chest.sets[set_idx].items.len();
 
@@ -72,6 +82,22 @@ pub fn draw_tool_chest_panel(
                             chest.sets[set_idx].collapsed = !collapsed;
                             changed = true;
                         }
+                        btn.context_menu(|ui| {
+                            if ui
+                                .button("Exportar conjunto (.redbim-tools.json)...")
+                                .clicked()
+                            {
+                                actions.push(UiAction::ExportToolSet(set_id));
+                                ui.close();
+                            }
+                            if !is_my
+                                && !is_recents
+                                && ui.button("Eliminar este conjunto").clicked()
+                            {
+                                remove_set_idx = Some(set_idx);
+                                ui.close();
+                            }
+                        });
                     })
                     .response
                     .rect;
@@ -105,15 +131,18 @@ pub fn draw_tool_chest_panel(
                     continue;
                 }
 
-                let cell_px = if *compact { 36.0 } else { 44.0 };
-                let step_px = cell_px + 7.0;
-                let cols = ((ui.available_width() / step_px).floor() as usize).clamp(3, 7);
+                let cell_px = if *compact { 26.0 } else { 32.0 };
+                let gap = 5.0;
+                let cols =
+                    (((ui.available_width() + gap) / (cell_px + gap)).floor() as usize).clamp(1, 9);
                 let mut remove_idx: Option<usize> = None;
                 let mut toggle_mode_idx: Option<usize> = None;
 
                 egui::Grid::new(format!("tc_grid_{set_idx}"))
                     .num_columns(cols)
-                    .spacing([5.0, 5.0])
+                    .min_col_width(cell_px)
+                    .min_row_height(cell_px)
+                    .spacing([gap, gap])
                     .show(ui, |ui| {
                         for (grid_i, (real_idx, item)) in items_snapshot.iter().enumerate() {
                             let is_active = active_item_id == Some(item.id);
@@ -155,7 +184,7 @@ pub fn draw_tool_chest_panel(
                                         theme.text_muted,
                                     );
                                 }
-                                // Properties mode indicator badge
+                                // Properties mode or auto-sequence indicator badge
                                 if item.properties_mode {
                                     ui.painter().text(
                                         egui::pos2(rect.left() + 4.0, rect.bottom() - 3.0),
@@ -163,6 +192,15 @@ pub fn draw_tool_chest_panel(
                                         "P",
                                         egui::FontId::proportional(9.0),
                                         theme.accent_cyan,
+                                    );
+                                }
+                                if item.sequence.is_some() {
+                                    ui.painter().text(
+                                        egui::pos2(rect.right() - 4.0, rect.bottom() - 3.0),
+                                        egui::Align2::RIGHT_BOTTOM,
+                                        "#",
+                                        egui::FontId::proportional(9.5),
+                                        theme.accent_amber,
                                     );
                                 }
                             }
@@ -188,6 +226,12 @@ pub fn draw_tool_chest_panel(
                                 };
                                 if ui.button(mode_lbl).clicked() {
                                     toggle_mode_idx = Some(*real_idx);
+                                    ui.close();
+                                }
+                                if ui.button("Secuencia automática (#)...").clicked() {
+                                    actions.push(UiAction::OpenDialog(
+                                        DialogRequest::ConfigureSequence { item_id: item.id },
+                                    ));
                                     ui.close();
                                 }
                                 if ui.button("Eliminar de la caja").clicked() {
@@ -216,6 +260,12 @@ pub fn draw_tool_chest_panel(
                 }
 
                 ui.add_space(6.0);
+            }
+            if let Some(ridx) = remove_set_idx
+                && ridx < chest.sets.len()
+            {
+                chest.sets.remove(ridx);
+                changed = true;
             }
         });
 

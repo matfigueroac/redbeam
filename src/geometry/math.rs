@@ -49,7 +49,7 @@ impl Point2 {
     #[inline]
     pub fn normalize(self) -> Self {
         let l = self.len();
-        if l <= 1e-12 {
+        if !l.is_finite() || l <= 1e-12 {
             Self::new(1.0, 0.0)
         } else {
             Self::new(self.x / l, self.y / l)
@@ -172,11 +172,25 @@ impl Rect2 {
 
     #[inline]
     pub fn expand(self, margin: f64) -> Self {
-        Self {
-            min_x: self.min_x - margin,
-            min_y: self.min_y - margin,
-            max_x: self.max_x + margin,
-            max_y: self.max_y + margin,
+        let min_x = self.min_x - margin;
+        let max_x = self.max_x + margin;
+        let min_y = self.min_y - margin;
+        let max_y = self.max_y + margin;
+        if min_x > max_x || min_y > max_y {
+            let c = self.center();
+            Self {
+                min_x: if min_x > max_x { c.x } else { min_x },
+                max_x: if min_x > max_x { c.x } else { max_x },
+                min_y: if min_y > max_y { c.y } else { min_y },
+                max_y: if min_y > max_y { c.y } else { max_y },
+            }
+        } else {
+            Self {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+            }
         }
     }
 
@@ -307,7 +321,7 @@ pub fn point_in_polygon(pt: Point2, poly: &[Point2]) -> bool {
         let pi = poly[i];
         let pj = poly[j];
         let intersect = ((pi.y > pt.y) != (pj.y > pt.y))
-            && (pt.x < (pj.x - pi.x) * (pt.y - pi.y) / (pj.y - pi.y + 1e-18) + pi.x);
+            && (pt.x < (pj.x - pi.x) * (pt.y - pi.y) / (pj.y - pi.y) + pi.x);
         if intersect {
             inside = !inside;
         }
@@ -344,25 +358,35 @@ pub fn dist_point_to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
 
 /// Angle in degrees (0..=180) at `vertex` between rays `vertex->p1` and `vertex->p2`.
 pub fn angle_three_points_deg(p1: Point2, vertex: Point2, p2: Point2) -> f64 {
-    let v1 = (p1 - vertex).normalize();
-    let v2 = (p2 - vertex).normalize();
+    let r1 = p1 - vertex;
+    let r2 = p2 - vertex;
+    if r1.len() <= 1e-9 || r2.len() <= 1e-9 {
+        return 0.0;
+    }
+    let v1 = r1.normalize();
+    let v2 = r2.normalize();
     let d = v1.dot(v2).clamp(-1.0, 1.0);
     d.acos().to_degrees()
 }
 
-/// Computes circle center & radius from 3 non-collinear points.
+/// Computes circle center & radius from 3 non-collinear points (translated to origin for numerical stability).
 pub fn circle_from_three_points(p1: Point2, p2: Point2, p3: Point2) -> Option<(Point2, f64)> {
-    let d = 2.0 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y));
-    if d.abs() < 1e-9 {
+    let b = p2 - p1;
+    let c = p3 - p1;
+    let d = 2.0 * (b.x * c.y - b.y * c.x);
+    if !d.is_finite() || d.abs() < 1e-9 {
         return None;
     }
-    let p1_sq = p1.x * p1.x + p1.y * p1.y;
-    let p2_sq = p2.x * p2.x + p2.y * p2.y;
-    let p3_sq = p3.x * p3.x + p3.y * p3.y;
-    let ux = (p1_sq * (p2.y - p3.y) + p2_sq * (p3.y - p1.y) + p3_sq * (p1.y - p2.y)) / d;
-    let uy = (p1_sq * (p3.x - p2.x) + p2_sq * (p1.x - p3.x) + p3_sq * (p2.x - p1.x)) / d;
-    let center = Point2::new(ux, uy);
-    Some((center, center.dist(p1)))
+    let b_sq = b.x * b.x + b.y * b.y;
+    let c_sq = c.x * c.x + c.y * c.y;
+    let ux = (c.y * b_sq - b.y * c_sq) / d;
+    let uy = (b.x * c_sq - c.x * b_sq) / d;
+    let radius = (ux * ux + uy * uy).sqrt();
+    if !radius.is_finite() || radius > 1e6 {
+        return None;
+    }
+    let center = Point2::new(p1.x + ux, p1.y + uy);
+    Some((center, radius))
 }
 
 /// Samples a 3-point circular arc from `start` through `mid` to `end`.
@@ -438,7 +462,7 @@ pub fn generate_cloud_polyline(points: &[Point2], arc_chord_pt: f64) -> Vec<Poin
         if len < 1e-4 {
             continue;
         }
-        let count = ((len / chord).round() as usize).max(1);
+        let count = ((len / chord).round() as usize).clamp(1, 512);
         let dir = edge * (1.0 / len);
         // Outward normal
         let normal = Point2::new(dir.y * outward_sign, -dir.x * outward_sign);
@@ -448,7 +472,6 @@ pub fn generate_cloud_polyline(points: &[Point2], arc_chord_pt: f64) -> Vec<Poin
         for k in 0..count {
             let p0 = a + dir * (k as f64 * seg_len);
             let p1 = a + dir * ((k + 1) as f64 * seg_len);
-            let mid = p0.midpoint(p1);
             // Sample semicircular arc from p0 to p1 bulging along normal
             const STEPS: usize = 6;
             for s in 0..STEPS {
@@ -459,8 +482,6 @@ pub fn generate_cloud_polyline(points: &[Point2], arc_chord_pt: f64) -> Vec<Poin
             }
             if k + 1 == count && i + 1 == points.len() {
                 out.push(p1);
-            } else {
-                let _ = mid;
             }
         }
     }
@@ -499,7 +520,9 @@ pub fn clip_hatch_lines(
 
     let mut result = Vec::new();
     let mut d = min_n + spacing * 0.5;
-    while d < max_n {
+    let mut scanlines = 0usize;
+    while d < max_n && scanlines < 4096 {
+        scanlines += 1;
         let mut hits = Vec::new();
         for poly in &loops {
             for i in 0..poly.len() {
@@ -515,10 +538,12 @@ pub fn clip_hatch_lines(
             }
         }
         hits.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        for pair in hits.as_chunks::<2>().0 {
+        for pair in hits.windows(2) {
             let p0 = dir * pair[0] + norm * d;
             let p1 = dir * pair[1] + norm * d;
-            if p0.dist(p1) > 0.5 {
+            if p0.dist(p1) > 0.5
+                && point_in_polygon_with_cutouts(p0.midpoint(p1), outer, cutouts)
+            {
                 result.push((p0, p1));
             }
         }

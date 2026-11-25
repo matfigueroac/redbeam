@@ -4,8 +4,101 @@ use crate::model::markup::{
 };
 use crate::model::units::{AreaUnit, LengthUnit, VolumeUnit};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// Sequence numbering style modeled after Bluebeam Revu's `SequenceStyle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SequenceStyle {
+    #[default]
+    Numeric,
+    AlphaUpper,
+    AlphaLower,
+}
+
+/// Auto-incrementing sequence attached to a Tool Chest item (e.g. `RDI-001`, `OBS-002`, `EJE-A`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceSpec {
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+    #[serde(default = "default_seq_start")]
+    pub next_value: u32,
+    #[serde(default = "default_seq_start")]
+    pub step: u32,
+    #[serde(default = "default_seq_pad")]
+    pub pad_digits: usize,
+    #[serde(default)]
+    pub style: SequenceStyle,
+}
+
+fn default_seq_start() -> u32 {
+    1
+}
+
+fn default_seq_pad() -> usize {
+    3
+}
+
+impl SequenceSpec {
+    pub fn numeric(prefix: impl Into<String>, start: u32, pad_digits: usize) -> Self {
+        Self {
+            prefix: prefix.into(),
+            suffix: String::new(),
+            next_value: start.max(1),
+            step: 1,
+            pad_digits,
+            style: SequenceStyle::Numeric,
+        }
+    }
+
+    pub fn alpha_upper(prefix: impl Into<String>, start: u32) -> Self {
+        Self {
+            prefix: prefix.into(),
+            suffix: String::new(),
+            next_value: start.max(1),
+            step: 1,
+            pad_digits: 0,
+            style: SequenceStyle::AlphaUpper,
+        }
+    }
+
+    fn format_alpha(mut n: u32, upper: bool) -> String {
+        if n == 0 {
+            n = 1;
+        }
+        let base = if upper { b'A' } else { b'a' };
+        let mut chars = Vec::new();
+        while n > 0 {
+            let rem = ((n - 1) % 26) as u8;
+            chars.push((base + rem) as char);
+            n = (n - 1) / 26;
+        }
+        chars.into_iter().rev().collect()
+    }
+
+    pub fn format_current(&self) -> String {
+        let core = match self.style {
+            SequenceStyle::Numeric => {
+                if self.pad_digits > 0 {
+                    format!("{:0width$}", self.next_value, width = self.pad_digits)
+                } else {
+                    self.next_value.to_string()
+                }
+            }
+            SequenceStyle::AlphaUpper => Self::format_alpha(self.next_value, true),
+            SequenceStyle::AlphaLower => Self::format_alpha(self.next_value, false),
+        };
+        format!("{}{core}{}", self.prefix, self.suffix)
+    }
+
+    pub fn take_next(&mut self) -> String {
+        let val = self.format_current();
+        self.next_value = self.next_value.saturating_add(self.step.max(1));
+        val
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ActiveTool {
@@ -34,6 +127,10 @@ pub enum ActiveTool {
     Image,
     Snapshot,
     Legend,
+    Hyperlink,
+    Space,
+    VisualSearch,
+    Redaction,
     // Measurements & Scale (Chile Metric + Imperial)
     Calibrate,
     MeasureLength,
@@ -76,6 +173,10 @@ impl ActiveTool {
             Self::Image => "Imagen",
             Self::Snapshot => "Instantánea",
             Self::Legend => "Leyenda de mediciones",
+            Self::Hyperlink => "Hipervínculo",
+            Self::Space => "Espacio / Recinto",
+            Self::VisualSearch => "Búsqueda visual (Conteo auto)",
+            Self::Redaction => "Marcar para Redacción (Censura)",
             Self::Calibrate => "Calibrar escala (2 pts)",
             Self::MeasureLength => "Cota / Longitud",
             Self::MeasurePolylength => "Polilongitud",
@@ -148,6 +249,10 @@ impl ActiveTool {
             Self::Image => "Imagen (I)",
             Self::Snapshot => "Instantánea",
             Self::Legend => "Leyenda de mediciones",
+            Self::Hyperlink => "Hipervínculo",
+            Self::Space => "Espacio / Recinto",
+            Self::VisualSearch => "Búsqueda visual (Conteo auto)",
+            Self::Redaction => "Marcar para Redacción (Censura)",
             Self::Calibrate => "Calibrar escala (2 pts)",
             Self::MeasureLength => "Longitud (Shift+L)",
             Self::MeasurePolylength => "Polilongitud",
@@ -187,6 +292,10 @@ impl ActiveTool {
             Self::Image => "Imagen",
             Self::Snapshot => "Captura",
             Self::Legend => "Leyenda",
+            Self::Hyperlink => "Hipervínculo",
+            Self::Space => "Espacio",
+            Self::VisualSearch => "Conteo visual",
+            Self::Redaction => "Redacción",
             Self::Calibrate => "Calibración",
             Self::MeasureLength => "Longitud",
             Self::MeasurePolylength => "Polilongitud",
@@ -240,6 +349,8 @@ impl ActiveTool {
             MarkupKind::Stamp { .. } => Self::Stamp,
             MarkupKind::Image { .. } => Self::Image,
             MarkupKind::Legend { .. } => Self::Legend,
+            MarkupKind::Hyperlink { .. } => Self::Hyperlink,
+            MarkupKind::Redaction { .. } => Self::Redaction,
             MarkupKind::MeasureLength { .. } => Self::MeasureLength,
             MarkupKind::MeasurePolylength { .. } => Self::MeasurePolylength,
             MarkupKind::MeasurePerimeter { .. } => Self::MeasurePerimeter,
@@ -265,6 +376,13 @@ pub struct ToolChestItem {
     pub default_text: String,
     pub stamp_subtitle: String,
     pub measurement_opts: Option<MeasurementOptions>,
+    #[serde(default)]
+    pub layer: Option<String>,
+    #[serde(default)]
+    pub unit_cost: Option<f64>,
+    /// Optional auto-increment sequence (`RDI-001`, `OBS-002`, `A..Z`).
+    #[serde(default)]
+    pub sequence: Option<SequenceSpec>,
     /// True = applies style/properties to selected markup; False = starts drawing new markup.
     pub properties_mode: bool,
 }
@@ -287,6 +405,13 @@ impl ToolChestItem {
                 _ => String::new(),
             },
             measurement_opts: markup.measurement_opts().cloned(),
+            layer: if markup.layer.trim().is_empty() {
+                None
+            } else {
+                Some(markup.layer.clone())
+            },
+            unit_cost: markup.unit_cost,
+            sequence: None,
             properties_mode: false,
         }
     }
@@ -300,6 +425,29 @@ pub struct ToolSet {
     pub is_my_tools: bool,
     pub is_recents: bool,
     pub items: Vec<ToolChestItem>,
+}
+
+impl ToolSet {
+    pub fn export_to_file(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|e| format!("Error serializando conjunto de herramientas: {e}"))?;
+        crate::storage::atomic_write_file(path, &json)
+    }
+
+    pub fn import_from_file(path: &Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("Error leyendo archivo de conjunto: {e}"))?;
+        let mut set: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("Archivo .redbim-tools.json inválido: {e}"))?;
+        set.id = Uuid::new_v4();
+        set.is_my_tools = false;
+        set.is_recents = false;
+        set.collapsed = false;
+        for it in &mut set.items {
+            it.id = Uuid::new_v4();
+        }
+        Ok(set)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -336,7 +484,7 @@ impl ToolChest {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = std::fs::write(path, json);
+                let _ = crate::storage::atomic_write_file(&path, json.as_bytes());
             }
         }
     }
@@ -356,6 +504,20 @@ impl ToolChest {
             my.items.push(item);
         }
         self.save();
+    }
+
+    /// Consumes the next sequence token for `item_id`, persists the chest, and returns the token.
+    pub fn advance_item_sequence(&mut self, item_id: Uuid) -> Option<String> {
+        for set in &mut self.sets {
+            if let Some(it) = set.items.iter_mut().find(|i| i.id == item_id)
+                && let Some(ref mut seq) = it.sequence
+            {
+                let token = seq.take_next();
+                self.save();
+                return Some(token);
+            }
+        }
+        None
     }
 
     pub fn default_chilean_sets() -> Self {
@@ -384,6 +546,9 @@ impl ToolChest {
             } else {
                 None
             },
+            layer: None,
+            unit_cost: None,
+            sequence: None,
             properties_mode: false,
         };
 
@@ -891,10 +1056,68 @@ impl ToolChest {
         let mut imperial_set = measurements;
         imperial_set.items.push(us_len);
 
+        let mut seq_rdi = item(
+            "RDI-001 (Secuencia)",
+            "RDI",
+            ActiveTool::Callout,
+            MarkupStyle {
+                stroke_color: red,
+                fill_color: Some([255, 255, 255, 240]),
+                fill_opacity: 0.94,
+                text_color: red,
+                bold: true,
+                end_end: LineEnd::ClosedArrow,
+                ..Default::default()
+            },
+            "RDI-001",
+        );
+        seq_rdi.sequence = Some(SequenceSpec::numeric("RDI-", 1, 3));
+
+        let mut seq_obs = item(
+            "OBS-001 (Secuencia)",
+            "Observación",
+            ActiveTool::TextBox,
+            MarkupStyle {
+                stroke_color: amber,
+                fill_color: Some([254, 249, 195, 240]),
+                fill_opacity: 0.94,
+                text_color: [24, 24, 27, 255],
+                bold: true,
+                ..Default::default()
+            },
+            "OBS-001",
+        );
+        seq_obs.sequence = Some(SequenceSpec::numeric("OBS-", 1, 3));
+
+        let mut seq_punch = item(
+            "Punch A (Secuencia)",
+            "Punch List",
+            ActiveTool::Note,
+            MarkupStyle {
+                stroke_color: blue,
+                fill_color: Some([219, 234, 254, 245]),
+                fill_opacity: 0.95,
+                note_icon: NoteIcon::Checkmark,
+                ..Default::default()
+            },
+            "P-A",
+        );
+        seq_punch.sequence = Some(SequenceSpec::alpha_upper("P-", 1));
+
+        let sequences = ToolSet {
+            id: Uuid::new_v4(),
+            title: "Secuencias (RDI / OBS)".to_string(),
+            collapsed: false,
+            is_my_tools: false,
+            is_recents: false,
+            items: vec![seq_rdi, seq_obs, seq_punch],
+        };
+
         Self {
             sets: vec![
                 my_tools,
                 recents,
+                sequences,
                 architect,
                 contractor,
                 engineer,
@@ -902,5 +1125,22 @@ impl ToolChest {
                 stamps,
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequence_spec_increments_numeric_and_alpha_cleanly() {
+        let mut num = SequenceSpec::numeric("RDI-", 1, 3);
+        assert_eq!(num.take_next(), "RDI-001");
+        assert_eq!(num.take_next(), "RDI-002");
+        assert_eq!(num.format_current(), "RDI-003");
+
+        let mut alpha = SequenceSpec::alpha_upper("EJE-", 26);
+        assert_eq!(alpha.take_next(), "EJE-Z");
+        assert_eq!(alpha.take_next(), "EJE-AA");
     }
 }

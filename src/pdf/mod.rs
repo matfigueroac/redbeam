@@ -1,9 +1,16 @@
+pub mod batch;
+pub mod color_process;
 pub mod compare;
 pub mod demo_blueprint;
 pub mod export;
 pub mod flatten;
+pub mod headers_footers;
 pub mod io;
+pub mod optimize;
+pub mod overlay;
+pub mod redact;
 pub mod renderer;
+pub mod visual_search;
 
 pub fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

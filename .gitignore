@@ -1,4 +1,15 @@
 /target/
+/work/
+/dist/
+/.env
+/.env.*
+!/.env.example
+# Informes locales con rutas a archivos de prueba
+/AUDITORIA.md
+/MEMORIA-EDICION.md
+/OPERACIONES-PAGINA.md
+/OPERACIONES-PDF.md
+/RENDIMIENTO.md
 *.log
 *.png
 !assets/*.png

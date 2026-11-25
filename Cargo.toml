@@ -1,6 +1,6 @@
 [package]
 name = "redbim"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "RedBIM - Visor, marcado y cubicación de planos PDF nativo para Windows (enfoque métrico chileno e imperial)"
 license = "MIT"
@@ -10,12 +10,27 @@ eframe = "0.37.0"
 hayro = "0.9.0"
 lopdf = "0.47.0"
 rfd = "0.18.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.29", features = ["v4", "serde"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 directories = "6.0"
+tempfile = "3.27"
+semver = "1.0"
+hex = "0.4"
+sha2 = "0.11"
+ureq = { version = "3.3", default-features = false, features = ["native-tls", "json"] }
+
+[build-dependencies]
+embed-resource = "3.0.11"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.56"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3

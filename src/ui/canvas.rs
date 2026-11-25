@@ -1,5 +1,5 @@
 use crate::geometry::hit_test::{
-    HandleKind, apply_handle_drag, box_rect_anchor, hit_test_handle, hit_test_markup,
+    HandleKind, apply_handle_drag, box_rect_anchor, callout_landing, hit_test_handle, hit_test_markup,
     is_measure_length_offset_drag_hit, list_handles, markup_bounds, translate_markup,
 };
 use crate::geometry::math::{
@@ -11,16 +11,17 @@ use crate::geometry::snap::{
     SnapIndex, SnapKind, SnapResult, apply_ortho_constraint, apply_soft_hv_snap,
     find_best_snap_excluding,
 };
-use crate::model::document::{AlignKind, DocumentTab, SplitViewMode};
+use crate::model::document::{AlignKind, DocumentTab, SpaceRegion, SplitViewMode};
 use crate::model::markup::{
-    BoxShape, CountStyle, HatchPattern, LineEnd, LineStyle, Markup, MarkupKind, MarkupStatus,
-    MarkupStyle, MeasurementOptions, NoteIcon,
+    BoxShape, CountStyle, HatchPattern, HyperlinkTarget, LineEnd, LineStyle, Markup, MarkupKind,
+    MarkupStatus, MarkupStyle, MeasurementOptions, NoteIcon,
 };
 use crate::model::scale::{PageScale, ViewportScale, resolve_scale_at};
 use crate::model::settings::AppSettings;
 use crate::model::tool_chest::ActiveTool;
 use crate::model::units::{format_angle, format_area, format_length, format_volume};
 use crate::ui::actions::{DialogRequest, UiAction};
+use crate::ui::icons::{IconKind, icon_button};
 use crate::ui::theme::RedBimTheme;
 use eframe::egui::{
     self, Color32, CornerRadius, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke,
@@ -89,6 +90,7 @@ pub enum DragMode {
     MoveHandle {
         markup_id: Uuid,
         handle: HandleKind,
+        callout_grab_offset: Option<Point2>,
         pushed_undo: bool,
     },
 }
@@ -108,12 +110,34 @@ pub enum CameraAnim {
     },
 }
 
+#[derive(Debug)]
+pub struct InlineTextEdit {
+    id: Uuid,
+    text: String,
+    subtitle: bool,
+    needs_focus: bool,
+    changed: bool,
+}
+
+impl InlineTextEdit {
+    pub fn new(id: Uuid, text: String) -> Self {
+        Self {
+            id,
+            text,
+            subtitle: false,
+            needs_focus: true,
+            changed: false,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CanvasState {
     pub creation: Option<CreationState>,
     pub drag: Option<DragMode>,
-    pub inline_edit: Option<(Uuid, String, bool)>,
+    pub inline_edit: Option<InlineTextEdit>,
     pub active_cutout_target: Option<Uuid>,
+    pub active_chest_template: Option<crate::model::tool_chest::ToolChestItem>,
     pub last_viewport_size: (f64, f64),
     pub hover_page_pt: Option<Point2>,
     pub hover_snap: Option<SnapResult>,
@@ -122,6 +146,35 @@ pub struct CanvasState {
 }
 
 impl CanvasState {
+    pub fn commit_inline_edit(&mut self, tab: &mut DocumentTab, ctx: &egui::Context) {
+        let Some(edit) = self.inline_edit.take() else {
+            return;
+        };
+        let Some(index) = tab.markups.iter().position(|m| m.id == edit.id) else {
+            return;
+        };
+        let markup = &tab.markups[index];
+        if tab.is_markup_locked(markup) {
+            return;
+        }
+        let changed = if matches!(markup.kind, MarkupKind::Note { .. }) {
+            edit.text != markup.comment
+        } else {
+            edit.changed
+        };
+        if changed {
+            tab.push_undo();
+            let markup = &mut tab.markups[index];
+            if edit.subtitle && let MarkupKind::Stamp { subtitle, .. } = &mut markup.kind {
+                *subtitle = edit.text;
+                markup.modified_at = chrono::Utc::now();
+            } else {
+                markup.set_text_content(edit.text);
+                fit_callout_text(ctx, markup, false);
+            }
+        }
+    }
+
     pub fn glide_to(&mut self, is_secondary: bool, target_zoom: f64, target_pan: Point2) {
         self.smooth_zoom = Some(CameraAnim::GlideTo {
             is_secondary,
@@ -135,6 +188,7 @@ impl CanvasState {
 pub struct TileRequest {
     pub doc_id: Uuid,
     pub page_index: usize,
+    pub is_secondary: bool,
     pub crop_rect_pt: Rect2,
     pub out_w: u16,
     pub out_h: u16,
@@ -142,10 +196,12 @@ pub struct TileRequest {
 
 pub struct CanvasResources<'a> {
     pub base_textures: &'a HashMap<(Uuid, usize), TextureHandle>,
-    pub tile_textures: &'a HashMap<(Uuid, usize), CachedTile>,
+    pub tile_textures: &'a HashMap<(Uuid, usize, bool), CachedTile>,
+    pub in_flight_tiles: &'a HashMap<(Uuid, usize, bool), (Rect2, u16, u16)>,
     pub thumb_textures: &'a HashMap<(Uuid, usize), TextureHandle>,
     pub image_textures: &'a HashMap<Uuid, TextureHandle>,
     pub snap_indices: &'a HashMap<(Uuid, usize), SnapIndex>,
+    pub modal_open: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,10 +219,12 @@ pub fn draw_document_workspace(
     tile_requests: &mut Vec<TileRequest>,
 ) {
     let full_rect = ui.available_rect_before_wrap();
-    canvas.last_viewport_size = (full_rect.width() as f64, full_rect.height() as f64);
+    let prev_cam = (tab.camera.zoom, tab.camera.pan);
+    let prev_sec = (tab.secondary_camera.zoom, tab.secondary_camera.pan);
 
     match tab.split_mode {
         SplitViewMode::None => {
+            canvas.last_viewport_size = (full_rect.width() as f64, full_rect.height() as f64);
             draw_canvas_pane(
                 ui,
                 full_rect,
@@ -187,6 +245,8 @@ pub fn draw_document_workspace(
             let half = full_rect.width() * 0.5;
             let left_r = Rect::from_min_max(full_rect.min, Pos2::new(full_rect.min.x + half - 2.0, full_rect.max.y));
             let right_r = Rect::from_min_max(Pos2::new(full_rect.min.x + half + 2.0, full_rect.min.y), full_rect.max);
+            let active_r = if tab.active_pane_secondary { right_r } else { left_r };
+            canvas.last_viewport_size = (active_r.width() as f64, active_r.height() as f64);
             draw_canvas_pane(
                 ui, left_r, false, tab, canvas, active_tool, default_style, default_meas_opts,
                 settings, &res, theme, actions, tile_requests,
@@ -204,6 +264,8 @@ pub fn draw_document_workspace(
             let half = full_rect.height() * 0.5;
             let top_r = Rect::from_min_max(full_rect.min, Pos2::new(full_rect.max.x, full_rect.min.y + half - 2.0));
             let bot_r = Rect::from_min_max(Pos2::new(full_rect.min.x, full_rect.min.y + half + 2.0), full_rect.max);
+            let active_r = if tab.active_pane_secondary { bot_r } else { top_r };
+            canvas.last_viewport_size = (active_r.width() as f64, active_r.height() as f64);
             draw_canvas_pane(
                 ui, top_r, false, tab, canvas, active_tool, default_style, default_meas_opts,
                 settings, &res, theme, actions, tile_requests,
@@ -216,6 +278,26 @@ pub fn draw_document_workspace(
                 ui, bot_r, true, tab, canvas, active_tool, default_style, default_meas_opts,
                 settings, &res, theme, actions, tile_requests,
             );
+        }
+    }
+
+    // Bluebeam-style Sync Views: mirror pan & zoom from the modified pane to the sibling pane
+    if tab.split_mode != SplitViewMode::None && tab.sync_split_views {
+        let cur_cam = (tab.camera.zoom, tab.camera.pan);
+        let cur_sec = (tab.secondary_camera.zoom, tab.secondary_camera.pan);
+        if tab.camera.fit_page && tab.secondary_camera.fit_page {
+            return;
+        }
+        if cur_cam != prev_cam {
+            tab.secondary_camera.zoom = tab.camera.zoom;
+            tab.secondary_camera.pan = tab.camera.pan;
+            tab.secondary_camera.fit_page =
+                tab.camera.fit_page && tab.camera.page_index == tab.secondary_camera.page_index;
+        } else if cur_sec != prev_sec {
+            tab.camera.zoom = tab.secondary_camera.zoom;
+            tab.camera.pan = tab.secondary_camera.pan;
+            tab.camera.fit_page =
+                tab.secondary_camera.fit_page && tab.secondary_camera.page_index == tab.camera.page_index;
         }
     }
 }
@@ -244,8 +326,10 @@ fn draw_canvas_pane(
     pane_ui.set_clip_rect(pane_rect);
 
     let resp = pane_ui.allocate_rect(pane_rect, Sense::click_and_drag());
-    if resp.clicked() || resp.drag_started() {
+    if !res.modal_open && (resp.clicked() || resp.drag_started()) && tab.active_pane_secondary != is_secondary {
         tab.active_pane_secondary = is_secondary;
+        canvas.creation = None;
+        canvas.drag = None;
     }
 
     let cam = if is_secondary {
@@ -260,27 +344,27 @@ fn draw_canvas_pane(
         return;
     };
 
-    // Fit page if pending (first open or FitPage action)
-    if cam.fit_pending && pane_rect.width() > 30.0 && pane_rect.height() > 30.0 {
-        let margin = 28.0;
-        let zx = (pane_rect.width() as f64 - margin * 2.0) / page.width_pt.max(1.0);
-        let zy = (pane_rect.height() as f64 - margin * 2.0) / page.height_pt.max(1.0);
-        cam.zoom = zx.min(zy).clamp(0.05, 8.0);
+    let width = f64::from(pane_rect.width());
+    let height = f64::from(pane_rect.height());
+    if cam.fit_page && width > 0.0 && height > 0.0 {
+        let margin = (width.min(height) * 0.04).min(20.0);
+        let zx = (width - margin * 2.0) / page.width_pt.max(1.0);
+        let zy = (height - margin * 2.0) / page.height_pt.max(1.0);
+        cam.zoom = zx.min(zy).min(8.0);
         let drawn_w = page.width_pt * cam.zoom;
         let drawn_h = page.height_pt * cam.zoom;
-        let pad_x = ((pane_rect.width() as f64 - drawn_w) * 0.5) / cam.zoom;
-        let pad_y = ((pane_rect.height() as f64 - drawn_h) * 0.5) / cam.zoom;
+        let pad_x = ((width - drawn_w) * 0.5) / cam.zoom;
+        let pad_y = ((height - drawn_h) * 0.5) / cam.zoom;
         cam.pan = Point2::new(-pad_x, -pad_y);
-        cam.fit_pending = false;
-        canvas.smooth_zoom = None;
     }
 
     // Handle smooth mouse wheel zoom anchored at cursor (60/120fps exponential ease)
     let pointer_pos = pane_ui.input(|i| i.pointer.hover_pos());
-    let hovered = resp.hovered() || pointer_pos.is_some_and(|p| pane_rect.contains(p));
-    if hovered {
+    let hovered = !res.modal_open && resp.contains_pointer();
+    if hovered && canvas.inline_edit.is_none() {
         let scroll = pane_ui.input(|i| i.smooth_scroll_delta);
         if scroll.y.abs() > 0.1 {
+            cam.fit_page = false;
             let anchor_screen = pointer_pos.unwrap_or(pane_rect.center());
             let before_xf = PageTransform {
                 page_width_pt: page.width_pt,
@@ -324,11 +408,17 @@ fn draw_canvas_pane(
         let dt = pane_ui.input(|i| i.stable_dt).clamp(0.001, 0.05) as f64;
         let alpha = 1.0 - (-18.0 * dt).exp();
         match anim {
+            CameraAnim::WheelZoom { is_secondary: sec, .. }
+            | CameraAnim::GlideTo { is_secondary: sec, .. }
+                if sec == is_secondary && cam.fit_page =>
+            {
+                canvas.smooth_zoom = None;
+            }
             CameraAnim::WheelZoom {
                 is_secondary: sec,
                 target_zoom,
-                anchor_page_pt,
                 anchor_screen,
+                anchor_page_pt,
             } if sec == is_secondary => {
                 let next_zoom = cam.zoom + (target_zoom - cam.zoom) * alpha;
                 if (target_zoom - next_zoom).abs() < 0.0005 * next_zoom.max(0.1) {
@@ -446,13 +536,26 @@ fn draw_canvas_pane(
             Point2::new(vis_max.x.min(page.width_pt), vis_max.y.min(page.height_pt)),
         );
 
+        let padded = crop_rect.expand(crop_rect.width().max(crop_rect.height()) * 0.15);
+        let clamped = Rect2::from_min_max(
+            Point2::new(padded.min_x.max(0.0), padded.min_y.max(0.0)),
+            Point2::new(padded.max_x.min(page.width_pt), padded.max_y.min(page.height_pt)),
+        );
+        let out_w = ((clamped.width() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
+        let out_h = ((clamped.height() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
+        // Compare against post-clamp effective resolution so HiDPI/large sheets never loop forever!
+        let effective_ppp = (out_w as f64 / clamped.width().max(1.0))
+            .min(out_h as f64 / clamped.height().max(1.0));
+
+        let tile_key = (tab.id, page_idx, is_secondary);
         let mut need_tile = true;
-        if let Some(tile) = res.tile_textures.get(&(tab.id, page_idx)) {
+        if let Some(tile) = res.tile_textures.get(&tile_key) {
             let covers = tile.crop_rect_pt.min_x <= crop_rect.min_x + 1.0
                 && tile.crop_rect_pt.min_y <= crop_rect.min_y + 1.0
                 && tile.crop_rect_pt.max_x >= crop_rect.max_x - 1.0
                 && tile.crop_rect_pt.max_y >= crop_rect.max_y - 1.0;
-            let res_ok = (tile.scale_px_per_pt - pixels_per_point).abs() / pixels_per_point.max(0.1) < 0.25;
+            let res_ok =
+                (tile.scale_px_per_pt - effective_ppp).abs() / effective_ppp.max(0.1) < 0.25;
             if covers && res_ok {
                 need_tile = false;
             }
@@ -467,22 +570,24 @@ fn draw_canvas_pane(
                 );
             }
         }
+        let already_in_flight = res.in_flight_tiles.get(&tile_key).is_some_and(|(r, w, h)| {
+            (r.min_x - clamped.min_x).abs() < 2.0
+                && (r.min_y - clamped.min_y).abs() < 2.0
+                && (r.max_x - clamped.max_x).abs() < 2.0
+                && (r.max_y - clamped.max_y).abs() < 2.0
+                && *w == out_w
+                && *h == out_h
+        });
         let zoom_settled = canvas.smooth_zoom.is_none()
             && canvas
                 .last_zoom_activity
                 .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(90));
-        if need_tile && crop_rect.width() > 2.0 && crop_rect.height() > 2.0 {
+        if need_tile && !already_in_flight && crop_rect.width() > 2.0 && crop_rect.height() > 2.0 {
             if zoom_settled {
-                let padded = crop_rect.expand(crop_rect.width().max(crop_rect.height()) * 0.15);
-                let clamped = Rect2::from_min_max(
-                    Point2::new(padded.min_x.max(0.0), padded.min_y.max(0.0)),
-                    Point2::new(padded.max_x.min(page.width_pt), padded.max_y.min(page.height_pt)),
-                );
-                let out_w = ((clamped.width() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
-                let out_h = ((clamped.height() * pixels_per_point).round() as u32).clamp(64, 2200) as u16;
                 tile_requests.push(TileRequest {
                     doc_id: tab.id,
                     page_index: page_idx,
+                    is_secondary,
                     crop_rect_pt: clamped,
                     out_w,
                     out_h,
@@ -550,6 +655,60 @@ fn draw_canvas_pane(
         );
     }
 
+    // Draw Spaces / Recintos (Bluebeam-style polygonal spatial zones)
+    if tab.highlight_spaces {
+        for sp in &tab.spaces {
+            if sp.page_index != page_idx || sp.points.len() < 3 {
+                continue;
+            }
+            let c = sp.fill_color;
+            let fill_a = (sp.fill_opacity * 255.0).clamp(14.0, 140.0) as u8;
+            let fill_c = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], fill_a);
+            let border_c = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 195);
+            let tris = triangulate_polygon_with_holes(&sp.points, &[]);
+            for [a, b, d] in tris {
+                let (ax, ay) = xf.page_to_screen(a);
+                let (bx, by) = xf.page_to_screen(b);
+                let (dx, dy) = xf.page_to_screen(d);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![Pos2::new(ax, ay), Pos2::new(bx, by), Pos2::new(dx, dy)],
+                    fill_c,
+                    Stroke::NONE,
+                ));
+            }
+            let spts: Vec<Pos2> = sp
+                .points
+                .iter()
+                .map(|pt| {
+                    let (sx, sy) = xf.page_to_screen(*pt);
+                    Pos2::new(sx, sy)
+                })
+                .collect();
+            for i in 0..spts.len() {
+                let a = spts[i];
+                let b = spts[(i + 1) % spts.len()];
+                draw_dashed_segment(&painter, a, b, Stroke::new(1.4, border_c), 7.0, 4.0);
+            }
+            let full_title = tab.space_full_title(sp.id);
+            let cent = polygon_centroid(&sp.points);
+            let (cx, cy) = xf.page_to_screen(cent);
+            let tag_w = (full_title.chars().count() as f32 * 6.5 + 14.0).clamp(64.0, 260.0);
+            let tag_r = Rect::from_center_size(Pos2::new(cx, cy), Vec2::new(tag_w, 18.0));
+            painter.rect_filled(
+                tag_r,
+                CornerRadius::same(4),
+                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 210),
+            );
+            painter.text(
+                tag_r.center(),
+                egui::Align2::CENTER_CENTER,
+                full_title,
+                FontId::proportional(10.5),
+                Color32::WHITE,
+            );
+        }
+    }
+
     // Page border outline
     painter.rect_stroke(
         page_screen_rect,
@@ -574,6 +733,7 @@ fn draw_canvas_pane(
     } else {
         Vec::new()
     };
+    let is_active_pane = tab.split_mode == SplitViewMode::None || tab.active_pane_secondary == is_secondary;
     for m in &tab.markups {
         if m.page_index != page_idx || !tab.is_layer_visible(&m.layer) {
             continue;
@@ -590,6 +750,7 @@ fn draw_canvas_pane(
             &doc_totals,
             res.image_textures,
             theme,
+            canvas.inline_edit.as_ref().filter(|edit| is_active_pane && edit.id == m.id),
         );
     }
 
@@ -646,9 +807,8 @@ fn draw_canvas_pane(
         );
     }
 
-    // Only process editing interactions in active pane (or if hovered)
-    let is_active_pane = tab.split_mode == SplitViewMode::None || tab.active_pane_secondary == is_secondary;
-    if is_active_pane {
+    // Only process editing interactions in active pane (skip while modal or inline editor is active)
+    if is_active_pane && !res.modal_open && canvas.inline_edit.is_none() {
         if active_tool.is_measurement() && !page.scale.is_set {
             draw_uncalibrated_scale_banner(pane_ui.ctx(), pane_rect, theme, actions);
         }
@@ -672,75 +832,639 @@ fn draw_canvas_pane(
         );
     }
 
-    // Inline text editor floating directly over markup when double-clicked or newly placed
-    let mut inline_commit: Option<(Uuid, String)> = None;
-    let mut inline_cancel = false;
-    if let Some((edit_id, ref mut buf, ref mut needs_focus)) = canvas.inline_edit
-        && let Some(m) = tab.markups.iter().find(|x| x.id == edit_id && x.page_index == page_idx)
-    {
-            let b = markup_bounds(m);
-            let (sx, sy) = xf.page_to_screen(b.min());
-            let (ex, ey) = xf.page_to_screen(b.max());
-            let w = (ex - sx).clamp(160.0, 340.0);
-            let h = (ey - sy).clamp(44.0, 140.0);
-            let area_pos = Pos2::new(
-                sx.clamp(pane_rect.left() + 8.0, (pane_rect.right() - w - 8.0).max(pane_rect.left())),
-                sy.clamp(pane_rect.top() + 8.0, (pane_rect.bottom() - h - 8.0).max(pane_rect.top())),
+    if is_active_pane && !res.modal_open {
+        if canvas.inline_edit.is_none() && canvas.drag.is_none() && canvas.creation.is_none() {
+            draw_selected_arrow_style(
+                pane_ui.ctx(), pane_rect, xf, page_idx, tab, theme, actions,
             );
+        }
+        draw_inline_text_editor(&mut pane_ui, pane_rect, xf, page_idx, tab, canvas, theme);
+    }
 
-            let mut commit = false;
-            let mut cancel = false;
-            egui::Area::new(egui::Id::unique(("inline_edit_area", edit_id)))
-                .fixed_pos(area_pos)
-                .order(egui::Order::Foreground)
-                .show(pane_ui.ctx(), |ui| {
-                    egui::Frame::new()
-                        .fill(theme.panel_bg)
-                        .stroke(Stroke::new(1.5, theme.accent_red))
-                        .corner_radius(CornerRadius::same(5))
-                        .inner_margin(egui::Margin::same(6))
+    if hovered && canvas.inline_edit.is_none() && canvas.drag.is_none() && canvas.creation.is_none()
+        && let Some(pointer) = pointer_pos
+        && !pane_ui.input(|i| i.pointer.any_down())
+    {
+        draw_note_preview(&resp, tab, xf, page_idx, pointer);
+    }
+}
+
+fn note_pin_rect(xf: PageTransform, pos: Point2) -> Rect {
+    let (x, y) = xf.page_to_screen(pos);
+    Rect::from_center_size(Pos2::new(x, y), Vec2::splat(22.0))
+}
+
+fn draw_note_preview(
+    canvas: &egui::Response,
+    tab: &DocumentTab,
+    xf: PageTransform,
+    page_index: usize,
+    pointer: Pos2,
+) {
+    for note in tab.markups.iter().rev() {
+        let MarkupKind::Note { pos } = note.kind else { continue };
+        if note.page_index != page_index || !tab.is_layer_visible(&note.layer) {
+            continue;
+        }
+        let pin = note_pin_rect(xf, pos).intersect(canvas.interact_rect);
+        if pin.contains(pointer) {
+            let text = note.comment.trim();
+            if !text.is_empty() {
+                egui::Tooltip::always_open(
+                    canvas.ctx.clone(), canvas.layer_id, canvas.id.with(("note_preview", note.id)), pin,
+                )
+                .width(280.0)
+                .show(|ui| ui.add(egui::Label::new(text).wrap()));
+            }
+            break;
+        }
+    }
+}
+
+fn draw_selected_arrow_style(
+    ctx: &egui::Context,
+    pane: Rect,
+    xf: PageTransform,
+    page_index: usize,
+    tab: &mut DocumentTab,
+    theme: &RedBimTheme,
+    actions: &mut Vec<UiAction>,
+) {
+    let [id] = tab.selected_ids.as_slice() else {
+        return;
+    };
+    let Some(index) = tab.markups.iter().position(|m| {
+        m.id == *id
+            && m.page_index == page_index
+            && matches!(m.kind, MarkupKind::Arrow { .. })
+            && tab.is_layer_visible(&m.layer)
+    }) else {
+        return;
+    };
+    let arrow = &tab.markups[index];
+    let layer_locked = tab.layers.iter().any(|layer| layer.name == arrow.layer && layer.locked);
+    let locked = tab.is_markup_locked(arrow);
+    let [r, g, b, _] = arrow.style.stroke_color;
+    let mut rgb = [r, g, b];
+    let bounds = screen_rect(xf, markup_bounds(arrow)).expand(4.0).intersect(pane);
+    if !bounds.is_positive() || pane.width() < 166.0 {
+        return;
+    }
+
+    let above = bounds.top() - pane.top() >= 46.0;
+    let anchor_y = if above { bounds.top() - 5.0 } else { bounds.bottom() + 5.0 };
+    let anchor = egui::pos2(bounds.center().x, anchor_y);
+    let mut color_changed = false;
+    egui::Area::new(egui::Id::unique(("selected_arrow_style", tab.id, *id)))
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .fixed_pos(anchor)
+        .pivot(if above { egui::Align2::CENTER_BOTTOM } else { egui::Align2::CENTER_TOP })
+        .constrain_to(pane.shrink(5.0))
+        .default_width(152.0)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(theme.panel_bg)
+                .inner_margin(egui::Margin::symmetric(5, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        color_changed = ui.add_enabled_ui(!locked, |ui| {
+                            ui.spacing_mut().interact_size = egui::vec2(27.0, 26.0);
+                            ui.color_edit_button_srgb(&mut rgb)
+                                .on_hover_text("Color de la flecha")
+                                .changed()
+                        }).inner;
+                        for (icon, label, enabled, action) in [
+                            (IconKind::Duplicate, "Duplicar", !locked, UiAction::DuplicateSelected),
+                            (IconKind::Lock, if locked { "Desbloquear" } else { "Bloquear" }, !layer_locked, UiAction::ToggleLockSelected),
+                            (IconKind::Properties, "Propiedades de la flecha", true, UiAction::ShowMarkupProperties),
+                            (IconKind::Trash, "Eliminar", !locked, UiAction::DeleteSelected),
+                        ] {
+                            if icon_button(ui, 26.0, icon, locked && icon == IconKind::Lock, enabled, label, theme).clicked() {
+                                actions.push(action);
+                            }
+                        }
+                    });
+                });
+        });
+    if color_changed {
+        tab.push_undo();
+        let markup = &mut tab.markups[index];
+        markup.style.stroke_color = [rgb[0], rgb[1], rgb[2], 255];
+        markup.style.text_color = markup.style.stroke_color;
+        markup.modified_at = chrono::Utc::now();
+        actions.push(UiAction::MarkupsStyleChanged);
+    }
+}
+
+fn draw_inline_text_editor(
+    ui: &mut egui::Ui,
+    pane_rect: Rect,
+    xf: PageTransform,
+    page_idx: usize,
+    tab: &mut DocumentTab,
+    canvas: &mut CanvasState,
+    theme: &RedBimTheme,
+) {
+    let Some(edit) = &mut canvas.inline_edit else {
+        return;
+    };
+    let Some(idx) = tab.markups.iter().position(|m| m.id == edit.id) else {
+        canvas.inline_edit = None;
+        return;
+    };
+    let m = &tab.markups[idx];
+    if tab.is_markup_locked(m) {
+        canvas.inline_edit = None;
+        return;
+    }
+    let mut cancel = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let commit_key = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
+    let mut commit = commit_key;
+
+    let on_current_page = m.page_index == page_idx && tab.is_layer_visible(&m.layer);
+    if !cancel && on_current_page && let MarkupKind::Note { pos } = m.kind {
+        let (x, y) = xf.page_to_screen(pos);
+        (commit, cancel) = draw_note_editor(ui, pane_rect, egui::pos2(x, y), edit, theme);
+        commit |= commit_key;
+    } else if !cancel && !commit && on_current_page {
+        let (rect, font_px, color, single_line) =
+            inline_text_geometry(m, edit, xf, pane_rect, theme);
+        let visible = pane_rect.intersect(rect);
+        if visible.is_positive() {
+            let focus_on_open = std::mem::take(&mut edit.needs_focus);
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(("markup_text", edit.id))
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                |ui| {
+                    ui.set_clip_rect(visible);
+                    if m.text_content().is_none() {
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::same(3), theme.panel_bg);
+                    }
+                    egui::ScrollArea::vertical()
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .max_height(rect.height())
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let te = ui.add(
-                                egui::TextEdit::multiline(buf)
-                                    .desired_width(w)
-                                    .desired_rows(3),
-                            );
-                            if *needs_focus {
-                                te.request_focus();
-                                *needs_focus = false;
+                            let widget = if single_line {
+                                egui::TextEdit::singleline(&mut edit.text).return_key(None)
+                            } else {
+                                egui::TextEdit::multiline(&mut edit.text).desired_rows(1)
+                            };
+                            let output = widget
+                                .font(FontId::proportional(font_px))
+                                .text_color(color)
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
+                                .desired_width(rect.width())
+                                .show(ui);
+                            if focus_on_open {
+                                output.response.request_focus();
                             }
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Guardar (Ctrl+Enter)").clicked() {
-                                    commit = true;
-                                }
-                                if ui.small_button("Cancelar (Esc)").clicked() {
-                                    cancel = true;
-                                }
-                            });
-                            if ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl) {
-                                commit = true;
-                            }
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                cancel = true;
+                            edit.changed |= output.response.changed();
+                            if let Some(cursor) = output.cursor_range
+                                && (focus_on_open
+                                    || output.response.changed()
+                                    || ui.input(|i| {
+                                        i.events.iter().any(|e| {
+                                            matches!(e, egui::Event::Key { pressed: true, .. })
+                                        })
+                                    }))
+                            {
+                                let caret = output
+                                    .galley
+                                    .pos_from_cursor(cursor.primary)
+                                    .translate(output.galley_pos.to_vec2());
+                                ui.scroll_to_rect(caret, None);
                             }
                         });
+                },
+            );
+            commit = !focus_on_open
+                && ui.input(|i| {
+                    i.pointer.any_pressed()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|pos| !visible.contains(pos))
                 });
-
-            if commit {
-                inline_commit = Some((edit_id, buf.clone()));
-            } else if cancel {
-                inline_cancel = true;
-            }
-    }
-    if let Some((edit_id, text_to_save)) = inline_commit {
-        canvas.inline_edit = None;
-        tab.push_undo();
-        if let Some(m_mut) = tab.markups.iter_mut().find(|x| x.id == edit_id) {
-            m_mut.set_text_content(text_to_save);
+        } else {
+            commit = true;
         }
-    } else if inline_cancel {
-        canvas.inline_edit = None;
+    } else if !on_current_page {
+        commit = true;
     }
+
+    if cancel {
+        canvas.inline_edit = None;
+    } else if commit {
+        canvas.commit_inline_edit(tab, ui.ctx());
+    }
+}
+
+fn draw_note_editor(
+    ui: &mut egui::Ui,
+    pane: Rect,
+    pin: Pos2,
+    edit: &mut InlineTextEdit,
+    theme: &RedBimTheme,
+) -> (bool, bool) {
+    let width = (pane.width() - 12.0).min(200.0);
+    if width <= 0.0 || !pane.expand(11.0).contains(pin) {
+        return (true, false);
+    }
+    let above = pane.bottom() - pin.y < 96.0;
+    let anchor = pin + egui::vec2(14.0, if above { -12.0 } else { 12.0 });
+    let opening = edit.needs_focus;
+    let field_id = egui::Id::unique(("note_text", edit.id));
+    let response = egui::Area::new(egui::Id::unique(("note_editor", edit.id)))
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .fixed_pos(anchor)
+        .pivot(if above { egui::Align2::LEFT_BOTTOM } else { egui::Align2::LEFT_TOP })
+        .constrain_to(pane.shrink(5.0))
+        .default_width(width)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(theme.panel_bg)
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(width - 14.0);
+                    // The release of the click that placed the pin can take focus from the field.
+                    let released = ui.input(|i| i.pointer.any_released());
+                    let focus = edit.needs_focus
+                        && !ui.is_sizing_pass()
+                        && !released
+                        && ui.input(|i| !i.pointer.primary_down());
+                    if edit.needs_focus && released {
+                        ui.ctx().request_repaint();
+                    }
+                    if focus {
+                        ui.memory_mut(|mem| mem.request_focus(field_id));
+                    }
+                    let field = egui::ScrollArea::vertical()
+                        .max_height(68.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut edit.text)
+                                    .id(field_id)
+                                    .hint_text("Escribe una nota…")
+                                    .text_color(theme.text_primary)
+                                    .desired_rows(2)
+                                    .desired_width(f32::INFINITY),
+                            )
+                        })
+                        .inner;
+                    if focus {
+                        field.request_focus();
+                        edit.needs_focus = false;
+                    }
+                    edit.changed |= field.changed();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let save = ui.button("Guardar").on_hover_text("Ctrl+Enter").clicked();
+                        let cancel = ui.button("Cancelar").clicked();
+                        (save, cancel)
+                    }).inner
+                }).inner
+        });
+    let outside = !opening && ui.input(|i| {
+        i.pointer.any_pressed()
+            && i.pointer.interact_pos().is_some_and(|pos| !response.response.rect.contains(pos))
+    });
+    let (save, cancel) = response.inner;
+    (save || outside, cancel)
+}
+
+#[cfg(test)]
+mod markup_overlay_tests {
+    use super::*;
+    use crate::model::document::PageModel;
+    use crate::model::settings::ThemeMode;
+
+    fn fixture(kind: MarkupKind) -> (DocumentTab, PageTransform, Rect) {
+        let mut tab = DocumentTab::new_with_pages(
+            "Prueba",
+            None,
+            Vec::new(),
+            vec![PageModel::new(0, 600.0, 400.0)],
+        );
+        let markup = Markup::new(0, "Marca", "Autor", MarkupStyle::default(), kind);
+        tab.select_only(markup.id);
+        tab.markups.push(markup);
+        let xf = PageTransform {
+            page_width_pt: 600.0,
+            page_height_pt: 400.0,
+            viewport_origin_x: 0.0,
+            viewport_origin_y: 0.0,
+            scale: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        };
+        (tab, xf, Rect::from_min_size(Pos2::ZERO, egui::vec2(600.0, 400.0)))
+    }
+
+    #[test]
+    fn callout_click_stays_put_and_corner_drag_keeps_leader_and_text() {
+        let tip = Point2::new(50.0, 190.0);
+        let knee = Point2::new(115.0, 129.0);
+        let original = Rect2::from_xywh(130.0, 100.0, 165.0, 36.0);
+        let (mut tab, xf, pane) = fixture(MarkupKind::Callout {
+            arrow_tip: tip,
+            knee,
+            box_rect: original,
+            text: "Detalle".into(),
+        });
+        let settings = AppSettings::default();
+        let theme = RedBimTheme::from_mode(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        let mut canvas = CanvasState::default();
+        let mut tool = ActiveTool::Select;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let grab = Pos2::new(292.0, 134.0);
+        let mut frame = |tab: &mut DocumentTab, events| {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(pane), events, ..Default::default() }, |ui| {
+                let response = ui.allocate_rect(pane, Sense::click_and_drag());
+                handle_canvas_input(
+                    ui, pane, &response, false, tab, &mut canvas, &mut tool,
+                    &MarkupStyle::default(), &MeasurementOptions::default(), &settings,
+                    None, None, 0.0, xf, &theme, &mut Vec::new(),
+                );
+            });
+            output.textures_delta.clear();
+        };
+        frame(&mut tab, vec![egui::Event::PointerMoved(grab)]);
+        frame(&mut tab, vec![button(grab, true)]);
+        frame(&mut tab, vec![]);
+        assert!(matches!(tab.markups[0].kind, MarkupKind::Callout { box_rect, .. } if box_rect == original));
+        frame(&mut tab, vec![button(grab, false)]);
+        let target = Pos2::new(126.0, 97.0);
+        frame(&mut tab, vec![button(grab, true), egui::Event::PointerMoved(target)]);
+        frame(&mut tab, vec![button(target, false)]);
+        assert!(matches!(tab.markups[0].kind, MarkupKind::Callout { arrow_tip, knee: elbow, box_rect, .. }
+            if arrow_tip == tip && elbow == knee && box_rect.min() == original.min()
+                && box_rect.width() == 54.0 && box_rect.max_y >= knee.y), "{:?}", tab.markups[0].kind);
+
+        let text = "Verificar fijaciones del perfil\nRevisar el encuentro con la cubierta";
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let mut edit = InlineTextEdit::new(tab.markups[0].id, text.into());
+            edit.changed = true;
+            canvas.inline_edit = Some(edit);
+            canvas.commit_inline_edit(&mut tab, ui.ctx());
+        });
+        output.textures_delta.clear();
+        let MarkupKind::Callout { arrow_tip, knee: elbow, box_rect, text: saved } = &tab.markups[0].kind else {
+            panic!("expected a callout");
+        };
+        assert_eq!((*arrow_tip, *elbow, box_rect.min()), (tip, knee, original.min()));
+        assert_eq!(callout_landing(*box_rect, *elbow), (knee, Point2::new(original.min_x, knee.y)));
+        assert!(box_rect.height() > original.height());
+        assert_eq!(saved, text);
+        tab.raw_pdf_bytes = crate::pdf::demo_blueprint::create_blank_pdf_bytes(600.0, 400.0, 1).into();
+        let bytes = crate::pdf::io::save_pdf_to_bytes(&tab).unwrap();
+        let reopened = crate::pdf::io::open_pdf_from_bytes("detalle.pdf", None, bytes).unwrap();
+        assert!(matches!(&reopened.markups[0].kind, MarkupKind::Callout { knee: restored_knee, box_rect: restored, text: restored_text, .. }
+            if *restored_knee == knee && restored == box_rect && restored_text == text));
+    }
+
+    #[test]
+    fn note_preview_shows_only_over_the_visible_pin() {
+        let (mut tab, xf, pane) = fixture(MarkupKind::Note { pos: Point2::new(100.0, 100.0) });
+        tab.markups[0].comment = "Revisar fijaciones".into();
+        let ctx = egui::Context::default();
+        let preview_is_visible = |pointer, tab: &DocumentTab| {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(pane), ..Default::default() },
+                |ui| {
+                    let response = ui.allocate_rect(pane, Sense::click_and_drag());
+                    draw_note_preview(&response, tab, xf, 0, pointer);
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes.iter().any(|entry| {
+                matches!(&entry.shape, egui::Shape::Text(text) if text.galley.text() == "Revisar fijaciones")
+            })
+        };
+        let pin = egui::pos2(100.0, 100.0);
+        preview_is_visible(pin, &tab);
+        assert!(preview_is_visible(pin, &tab));
+        assert!(!preview_is_visible(egui::pos2(112.0, 100.0), &tab));
+    }
+
+    #[test]
+    fn note_editor_shows_a_prompt_and_saves_typed_text() {
+        let (mut tab, xf, pane) = fixture(MarkupKind::Note { pos: Point2::new(480.0, 360.0) });
+        tab.raw_pdf_bytes = crate::pdf::demo_blueprint::create_blank_pdf_bytes(600.0, 400.0, 1).into();
+        let mut canvas = CanvasState {
+            inline_edit: Some(InlineTextEdit::new(tab.markups[0].id, String::new())),
+            ..Default::default()
+        };
+        let theme = RedBimTheme::from_mode(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(pane), events, ..Default::default() },
+                |ui| draw_inline_text_editor(ui, pane, xf, 0, &mut tab, &mut canvas, &theme),
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let pin = egui::pos2(480.0, 360.0);
+        for pressed in [true, false] {
+            frame(vec![egui::Event::PointerButton {
+                pos: pin, button: egui::PointerButton::Primary, pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let shapes = frame(vec![]);
+        assert!(shapes.iter().any(|entry| matches!(&entry.shape, egui::Shape::Text(text) if text.galley.text() == "Escribe una nota…")));
+        frame(vec![egui::Event::Text("Revisar fijaciones".into())]);
+        let shapes = frame(vec![]);
+        let save_pos = shapes.iter().find_map(|entry| match &entry.shape {
+            egui::Shape::Text(text) if text.galley.text() == "Guardar" => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            _ => None,
+        }).unwrap();
+        let mut click = vec![egui::Event::PointerMoved(save_pos)];
+        for pressed in [true, false] {
+            click.push(egui::Event::PointerButton {
+                pos: save_pos, button: egui::PointerButton::Primary, pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        frame(click);
+        assert!(canvas.inline_edit.is_none());
+        assert_eq!(tab.markups[0].comment, "Revisar fijaciones");
+        let bytes = crate::pdf::io::save_pdf_to_bytes(&tab).unwrap();
+        let reopened = crate::pdf::io::open_pdf_from_bytes("prueba-nota.pdf", None, bytes).unwrap();
+        assert_eq!(reopened.markups[0].comment, "Revisar fijaciones");
+    }
+
+    #[test]
+    fn arrow_toolbar_is_compact_and_opens_the_color_picker() {
+        let (mut tab, xf, pane) = fixture(MarkupKind::Arrow {
+            start: Point2::new(200.0, 204.0),
+            end: Point2::new(300.0, 250.0),
+        });
+        let theme = RedBimTheme::from_mode(ThemeMode::Dark);
+        let ctx = egui::Context::default();
+        let [r, g, b, _] = tab.markups[0].style.stroke_color;
+        let color = Color32::from_rgb(r, g, b);
+        let id = egui::Id::unique(("selected_arrow_style", tab.id, tab.markups[0].id));
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(pane), events, ..Default::default() },
+                |_| draw_selected_arrow_style(
+                    &ctx, pane, xf, 0, &mut tab, &theme, &mut Vec::new(),
+                ),
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        frame(vec![]);
+        let shapes = frame(vec![]);
+        let bar = ctx.memory(|mem| mem.area_rect(id)).unwrap();
+        assert!(bar.width() <= 165.0 && bar.height() <= 40.0);
+        assert!(pane.contains_rect(bar) && bar.bottom() < 204.0);
+        let swatch = shapes.iter().find_map(|entry| match &entry.shape {
+            egui::Shape::Rect(shape) if shape.fill == color && bar.contains_rect(shape.rect) => {
+                Some(shape.rect.center())
+            }
+            _ => None,
+        }).unwrap();
+        assert!(pane.contains(swatch) && swatch.y < 204.0);
+        frame(vec![egui::Event::PointerMoved(swatch)]);
+        for pressed in [true, false] {
+            frame(vec![egui::Event::PointerButton {
+                pos: swatch, button: egui::PointerButton::Primary, pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+    }
+}
+
+fn inline_text_geometry(
+    m: &Markup,
+    edit: &InlineTextEdit,
+    xf: PageTransform,
+    pane: Rect,
+    theme: &RedBimTheme,
+) -> (Rect, f32, Color32, bool) {
+    let font_px = (m.style.font_size * xf.scale as f32).clamp(6.0, 48.0);
+    let [r, g, b, _] = m.style.text_color;
+    let color = Color32::from_rgb(r, g, b);
+    match &m.kind {
+        MarkupKind::Callout { box_rect, .. } => (
+            callout_text_rect(screen_rect(xf, *box_rect), xf.scale as f32),
+            m.style.font_size * xf.scale as f32,
+            color,
+            false,
+        ),
+        MarkupKind::TextBox { rect, .. } | MarkupKind::CloudPlus { box_rect: rect, .. } => {
+            let inner = screen_rect(xf, *rect).shrink2(Vec2::new(5.0, 3.0));
+            (
+                inner,
+                font_px.clamp(6.5, (inner.height() * 0.55).max(7.0)),
+                color,
+                false,
+            )
+        }
+        MarkupKind::Typewriter { pos, .. } => {
+            let (x, y) = xf.page_to_screen(*pos);
+            let bounds = screen_rect(xf, markup_bounds(m));
+            let width = bounds.width().max(120.0).min((pane.right() - x).max(1.0));
+            let height = (edit.text.split('\n').count() as f32 + 2.0) * font_px * 1.4;
+            (
+                Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height)),
+                font_px,
+                color,
+                false,
+            )
+        }
+        MarkupKind::Stamp { rect, .. } | MarkupKind::Redaction { rect, .. } => {
+            let bounds = screen_rect(xf, *rect);
+            let (center_y, size, ink) = match &m.kind {
+                MarkupKind::Stamp { .. } if edit.subtitle => {
+                    (0.72, (bounds.height() * 0.20).clamp(5.5, 14.0), color)
+                }
+                MarkupKind::Stamp { .. } => {
+                    (0.35, (bounds.height() * 0.34).clamp(7.0, 28.0), color)
+                }
+                _ => (
+                    0.5,
+                    (bounds.height() * 0.34).clamp(8.5, 16.0),
+                    Color32::WHITE,
+                ),
+            };
+            let center = egui::pos2(bounds.center().x, bounds.top() + bounds.height() * center_y);
+            let field = Rect::from_center_size(center, Vec2::new(bounds.width() - 6.0, size * 1.3));
+            (field.intersect(bounds), size, ink, true)
+        }
+        MarkupKind::Legend { pos, width_pt, .. } => {
+            let (x, y) = xf.page_to_screen(*pos);
+            let rect = Rect::from_min_size(
+                egui::pos2(x + 8.0, y + 4.0),
+                Vec2::new((*width_pt * xf.scale).max(200.0) as f32 - 16.0, 17.0),
+            );
+            (rect, 12.0, Color32::WHITE, true)
+        }
+        MarkupKind::Hyperlink { .. } => {
+            let (rect, _) = hyperlink_badge(m, xf).unwrap();
+            (
+                rect.shrink2(Vec2::new(4.0, 1.0)),
+                10.0,
+                Color32::WHITE,
+                true,
+            )
+        }
+        _ => {
+            let bounds = screen_rect(xf, markup_bounds(m));
+            let width = pane.width().min(220.0);
+            let pos = egui::pos2(
+                bounds.left().clamp(pane.left(), pane.right() - width),
+                (bounds.top() + 12.0).clamp(pane.top(), (pane.bottom() - 48.0).max(pane.top())),
+            );
+            (
+                Rect::from_min_size(pos, Vec2::new(width, 48.0)),
+                13.0,
+                theme.text_primary,
+                false,
+            )
+        }
+    }
+}
+
+fn hyperlink_badge(m: &Markup, xf: PageTransform) -> Option<(Rect, String)> {
+    let MarkupKind::Hyperlink {
+        rect,
+        target,
+        description,
+    } = &m.kind
+    else {
+        return None;
+    };
+    let text = if !description.trim().is_empty() {
+        format!("🔗 {}", description.trim())
+    } else {
+        match target {
+            HyperlinkTarget::Page { page_index } => format!("🔗 Ir a Pág. {}", page_index + 1),
+            HyperlinkTarget::Url(url) => format!("🔗 {url}"),
+        }
+    };
+    let bounds = screen_rect(xf, *rect);
+    let width = (text.chars().count() as f32 * 6.0 + 12.0).clamp(60.0, 220.0);
+    let pos = egui::pos2(bounds.left(), (bounds.top() - 18.0).max(0.0));
+    Some((Rect::from_min_size(pos, Vec2::new(width, 17.0)), text))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -785,11 +1509,25 @@ fn handle_canvas_input(
     let double_clicked = resp.double_clicked();
     let secondary_clicked = resp.secondary_clicked();
 
-    // Update cursor icon
-    if space_down || *active_tool == ActiveTool::Pan || matches!(canvas.drag, Some(DragMode::Pan { .. })) {
-        ui.ctx().set_cursor_icon(CursorIcon::Grab);
-    } else if *active_tool != ActiveTool::Select {
-        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    let panning = matches!(canvas.drag, Some(DragMode::Pan { .. }))
+        && (primary_down || middle_down);
+    if resp.hovered() || resp.dragged() || panning {
+        let cursor = if panning || middle_down {
+            CursorIcon::Grabbing
+        } else if space_down || *active_tool == ActiveTool::Pan {
+            CursorIcon::Grab
+        } else {
+            match *active_tool {
+                ActiveTool::Select => CursorIcon::Default,
+                ActiveTool::ZoomWindow => CursorIcon::ZoomIn,
+                ActiveTool::TextBox | ActiveTool::Typewriter => CursorIcon::Text,
+                ActiveTool::Note | ActiveTool::Stamp | ActiveTool::Image | ActiveTool::Legend => {
+                    CursorIcon::Copy
+                }
+                _ => CursorIcon::Crosshair,
+            }
+        };
+        ui.ctx().set_cursor_icon(cursor);
     }
 
     // Pan with Middle mouse, Space+drag, or Pan tool
@@ -807,6 +1545,7 @@ fn handle_canvas_input(
                 };
                 cam.pan.x -= delta.x as f64 / cam.zoom;
                 cam.pan.y -= delta.y as f64 / cam.zoom;
+                cam.fit_page = false;
                 return;
             }
             None if resp.hovered() || resp.dragged() => {
@@ -821,8 +1560,24 @@ fn handle_canvas_input(
         canvas.drag = None;
     }
 
+    // Clear active pointer drags cleanly if mouse button was released outside the window
+    if !primary_down
+        && matches!(
+            canvas.drag,
+            Some(DragMode::MoveHandle { .. } | DragMode::MoveSelected { .. })
+        )
+        && !(primary_released && matches!(canvas.drag, Some(DragMode::MoveHandle {
+            callout_grab_offset: Some(_), pushed_undo: true, ..
+        })))
+    {
+        canvas.drag = None;
+    }
+
     // Compute current cursor page coordinate + snap
     let Some(screen_pos) = pointer_pos else {
+        if !primary_down {
+            canvas.drag = None;
+        }
         canvas.hover_page_pt = None;
         canvas.hover_snap = None;
         return;
@@ -833,14 +1588,18 @@ fn handle_canvas_input(
 
     let dragging_point_handle = match &canvas.drag {
         Some(DragMode::MoveHandle {
-            markup_id, handle, ..
-        }) if *handle != HandleKind::MeasureOffset && !alt_down => Some(*markup_id),
+            markup_id, handle, callout_grab_offset, pushed_undo,
+        }) if *handle != HandleKind::MeasureOffset
+            && !alt_down
+            && (callout_grab_offset.is_none()
+                || (*handle == HandleKind::CalloutTip && (*pushed_undo || resp.dragged()))) => Some(*markup_id),
         _ => None,
     };
 
-    let snap_res = if (*active_tool != ActiveTool::Select && *active_tool != ActiveTool::Pan)
-        || dragging_point_handle.is_some()
-    {
+    let snapping_creation = *active_tool != ActiveTool::Select
+        && *active_tool != ActiveTool::Pan
+        && !matches!(canvas.creation, Some(CreationState::Callout { .. }));
+    let snap_res = if snapping_creation || dragging_point_handle.is_some() {
         find_best_snap_excluding(
             raw_pt,
             tol_pt,
@@ -919,6 +1678,18 @@ fn handle_canvas_input(
         }
     }
 
+    // Backspace during Poly creation removes the last placed vertex (Bluebeam-style vertex undo)
+    if ui.input(|i| i.key_pressed(egui::Key::Backspace))
+        && let Some(CreationState::Poly { ref mut points, .. }) = canvas.creation
+    {
+        if points.len() > 1 {
+            points.pop();
+        } else {
+            canvas.creation = None;
+        }
+        return;
+    }
+
     // Cancel creation on Escape
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         if canvas.creation.take().is_some() {
@@ -931,41 +1702,78 @@ fn handle_canvas_input(
         tab.selected_ids.clear();
     }
 
+    let open_note = match *active_tool {
+        ActiveTool::Select => resp.clicked(),
+        ActiveTool::Note => primary_pressed,
+        _ => false,
+    };
+    if open_note && in_pane && !ctrl_down && !shift_down
+        && let Some(note) = tab.markups.iter().rev().find(|m| {
+            m.page_index == cam_page_idx
+                && tab.is_layer_visible(&m.layer)
+                && match m.kind {
+                    MarkupKind::Note { pos } => note_pin_rect(xf, pos).contains(screen_pos),
+                    _ => hit_test_markup(m, raw_pt, tol_pt),
+                }
+        })
+        && matches!(note.kind, MarkupKind::Note { .. })
+        && !tab.is_markup_locked(note)
+    {
+        canvas.inline_edit = Some(InlineTextEdit::new(note.id, note.comment.clone()));
+        tab.select_only(note.id);
+        canvas.drag = None;
+        return;
+    }
+
     // If Select tool active: handle selection, handles, dragging, double-click inline edit & context menu
     if *active_tool == ActiveTool::Select {
         // Smart hover cursor in Select mode for MeasureLength offset slide & endpoint handles
-        if in_pane && canvas.drag.is_none() {
+        if resp.hovered() && !space_down && canvas.drag.is_none() {
             let mut set_cursor = false;
             for &sid in &tab.selected_ids {
-                if let Some(m) = tab.markups.iter().find(|m| m.id == sid && m.page_index == cam_page_idx && !m.locked) {
-                    if let Some(h) = hit_test_handle(m, raw_pt, tol_pt * 1.1) {
-                        if h == HandleKind::MeasureOffset {
-                            if let MarkupKind::MeasureLength { start, end, .. } = &m.kind {
-                                let d = *end - *start;
-                                let icon = if d.x.abs() >= d.y.abs() {
-                                    CursorIcon::ResizeVertical
-                                } else {
-                                    CursorIcon::ResizeHorizontal
-                                };
-                                ui.ctx().set_cursor_icon(icon);
-                                set_cursor = true;
-                                break;
-                            }
-                        } else {
-                            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                if let Some(m) = tab.markups.iter().find(|m| {
+                    m.id == sid && m.page_index == cam_page_idx && !tab.is_markup_locked(m)
+                }) && let Some(h) = hit_test_handle(m, raw_pt, tol_pt * 1.1)
+                {
+                    if h == HandleKind::MeasureOffset {
+                        if let MarkupKind::MeasureLength { start, end, .. } = &m.kind {
+                            let d = *end - *start;
+                            let icon = if d.x.abs() >= d.y.abs() {
+                                CursorIcon::ResizeVertical
+                            } else {
+                                CursorIcon::ResizeHorizontal
+                            };
+                            ui.ctx().set_cursor_icon(icon);
                             set_cursor = true;
                             break;
                         }
+                    } else {
+                        let icon = match h {
+                            HandleKind::CloudCorner(_) if alt_down => CursorIcon::Move,
+                            HandleKind::RectCorner(0 | 2) | HandleKind::CalloutBoxCorner(0 | 2)
+                            | HandleKind::CloudCorner(0 | 2) => {
+                                CursorIcon::ResizeNwSe
+                            }
+                            HandleKind::RectCorner(_) | HandleKind::CalloutBoxCorner(_)
+                            | HandleKind::CloudCorner(_) => {
+                                CursorIcon::ResizeNeSw
+                            }
+                            _ => CursorIcon::Move,
+                        };
+                        ui.ctx().set_cursor_icon(icon);
+                        set_cursor = true;
+                        break;
                     }
                 }
             }
             if !set_cursor
                 && !alt_down
-                && let Some(m) = tab
-                    .markups
-                    .iter()
-                    .rev()
-                    .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && !m.locked && is_measure_length_offset_drag_hit(m, raw_pt, tol_pt))
+                && let Some(m) = tab.markups.iter().rev().find(|m| {
+                    m.page_index == cam_page_idx
+                        && tab.is_layer_visible(&m.layer)
+                        && !tab.is_markup_locked(m)
+                        && is_measure_length_offset_drag_hit(m, raw_pt, tol_pt)
+                })
                 && let MarkupKind::MeasureLength { start, end, .. } = &m.kind
             {
                 let d = *end - *start;
@@ -980,51 +1788,103 @@ fn handle_canvas_input(
 
         if double_clicked
             && in_pane
-            && let Some(m) = tab
-                .markups
-                .iter()
-                .rev()
-                .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, raw_pt, tol_pt))
+            && let Some(m) = tab.markups.iter().rev().find(|m| {
+                m.page_index == cam_page_idx
+                    && tab.is_layer_visible(&m.layer)
+                    && (hit_test_markup(m, raw_pt, tol_pt)
+                        || matches!(m.kind, MarkupKind::Hyperlink { .. })
+                            && hyperlink_badge(m, xf).is_some_and(|(r, _)| pointer_pos.is_some_and(|pos| r.contains(pos))))
+            })
         {
-            let txt = m
-                .text_content()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| m.comment.clone());
-            canvas.inline_edit = Some((m.id, txt, true));
-            return;
+            if let MarkupKind::Hyperlink { target, .. } = &m.kind
+                && !hyperlink_badge(m, xf).is_some_and(|(r, _)| pointer_pos.is_some_and(|pos| r.contains(pos)))
+            {
+                actions.push(UiAction::FollowHyperlink(target.clone()));
+                return;
+            }
+            if !tab.is_markup_locked(m) {
+                let mut edit = InlineTextEdit::new(m.id, m.text_content().unwrap_or(&m.comment).to_owned());
+                if let MarkupKind::Stamp { rect, subtitle, .. } = &m.kind
+                    && raw_pt.y > rect.min_y + rect.height() * 0.55
+                {
+                    edit.subtitle = true;
+                    edit.text.clone_from(subtitle);
+                }
+                tab.selected_ids = vec![m.id];
+                canvas.inline_edit = Some(edit);
+                return;
+            }
         }
 
-        if primary_pressed && in_pane {
+        let select_press = ui.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }
+                    if pane_rect.contains(*pos) => Some(xf.screen_to_page(pos.x as f64, pos.y as f64)),
+                _ => None,
+            })
+        });
+        let callout_moved = ui.input(|i| i.pointer.press_origin())
+            .map(|pos| xf.screen_to_page(pos.x as f64, pos.y as f64))
+            .or(select_press)
+            .is_some_and(|origin| raw_pt.dist(origin) >= 3.0 / xf.scale.max(0.05));
+        if let Some(press_pt) = select_press
+            && (resp.hovered() || resp.dragged() || resp.drag_stopped())
+        {
+            // Ctrl+Click on a Hyperlink follows it immediately (Bluebeam-style)
+            if ctrl_down
+                && let Some(link_target) = tab.markups.iter().rev().find_map(|m| {
+                    if m.page_index == cam_page_idx
+                        && tab.is_layer_visible(&m.layer)
+                        && hit_test_markup(m, press_pt, tol_pt)
+                        && let MarkupKind::Hyperlink { target, .. } = &m.kind
+                    {
+                        Some(target.clone())
+                    } else {
+                        None
+                    }
+                })
+            {
+                actions.push(UiAction::FollowHyperlink(link_target));
+                return;
+            }
             // Check selected markup handles first
-            for &sid in &tab.selected_ids {
-                if let Some(m) = tab.markups.iter().find(|m| m.id == sid && m.page_index == cam_page_idx)
-                    && !m.locked
-                    && let Some(handle) = hit_test_handle(m, raw_pt, tol_pt * 1.1)
-                {
-                    canvas.drag = Some(DragMode::MoveHandle {
-                        markup_id: sid,
-                        handle,
-                        pushed_undo: false,
-                    });
+            let selected_handle = tab.selected_ids.iter().find_map(|&id| {
+                let m = tab.markups.iter().find(|m| {
+                    m.id == id && m.page_index == cam_page_idx && !tab.is_markup_locked(m)
+                })?;
+                Some((m, hit_test_handle(m, press_pt, tol_pt * 1.1)?))
+            });
+            if let Some((m, handle)) = selected_handle {
+                let callout_grab_offset = if matches!(m.kind, MarkupKind::Callout { .. }) {
+                    list_handles(m).into_iter().find_map(|(kind, pos)| {
+                        (kind == handle).then_some(pos - press_pt)
+                    })
+                } else {
+                    None
+                };
+                canvas.drag = Some(DragMode::MoveHandle {
+                    markup_id: m.id,
+                    handle,
+                    callout_grab_offset,
+                    pushed_undo: false,
+                });
+                if callout_grab_offset.is_none() {
                     return;
                 }
-            }
-
-            // Check markup body hit top-to-bottom
-            if let Some(hit_markup) = tab
+            } else if let Some(hit_markup) = tab
                 .markups
                 .iter()
                 .rev()
-                .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, raw_pt, tol_pt))
+                .find(|m| m.page_index == cam_page_idx && tab.is_layer_visible(&m.layer) && hit_test_markup(m, press_pt, tol_pt))
             {
                 let hit_id = hit_markup.id;
-                let hit_locked = hit_markup.locked;
+                let hit_locked = tab.is_markup_locked(hit_markup);
                 let drag_measure_offset = !alt_down
                     && !shift_down
                     && !ctrl_down
                     && !hit_locked
                     && tab.selected_ids.len() <= 1
-                    && is_measure_length_offset_drag_hit(hit_markup, raw_pt, tol_pt);
+                    && is_measure_length_offset_drag_hit(hit_markup, press_pt, tol_pt);
                 if shift_down || ctrl_down {
                     tab.toggle_select(hit_id);
                 } else if !tab.selected_ids.contains(&hit_id) {
@@ -1034,33 +1894,43 @@ fn handle_canvas_input(
                     canvas.drag = Some(DragMode::MoveHandle {
                         markup_id: hit_id,
                         handle: HandleKind::MeasureOffset,
+                        callout_grab_offset: None,
                         pushed_undo: false,
                     });
                 } else {
                     canvas.drag = Some(DragMode::MoveSelected {
-                        last_pt: raw_pt,
+                        last_pt: press_pt,
                         pushed_undo: false,
                     });
                 }
                 return;
+            } else {
+                if !shift_down && !ctrl_down {
+                    tab.selected_ids.clear();
+                }
+                canvas.drag = Some(DragMode::Marquee {
+                    start_pt: press_pt,
+                    current_pt: raw_pt,
+                });
             }
-
-            if !shift_down && !ctrl_down {
-                tab.selected_ids.clear();
-            }
-            canvas.drag = Some(DragMode::Marquee {
-                start_pt: raw_pt,
-                current_pt: raw_pt,
-            });
         }
 
         match &mut canvas.drag {
             Some(DragMode::MoveHandle {
                 markup_id,
                 handle,
+                callout_grab_offset,
                 pushed_undo,
             }) => {
-                if primary_down {
+                let finishing_callout = callout_grab_offset.is_some()
+                    && primary_released && (*pushed_undo || callout_moved);
+                if primary_down || finishing_callout {
+                    if !*pushed_undo
+                        && ((callout_grab_offset.is_some() && !callout_moved)
+                            || (matches!(handle, HandleKind::CloudCorner(_)) && !resp.dragged()))
+                    {
+                        return;
+                    }
                     let mid = *markup_id;
                     let h = *handle;
                     if !*pushed_undo {
@@ -1078,7 +1948,7 @@ fn handle_canvas_input(
                                 };
                                 ui.ctx().set_cursor_icon(icon);
                             }
-                            apply_handle_drag(m, h, raw_pt);
+                            apply_handle_drag(m, h, raw_pt, false);
                             if let MarkupKind::MeasureLength { offset_pt, .. } = &mut m.kind
                                 && offset_pt.abs() < 3.0 / xf.scale.max(0.05)
                             {
@@ -1086,28 +1956,55 @@ fn handle_canvas_input(
                             }
                         } else {
                             let mut hv_guide: Option<(Point2, Point2)> = None;
-                            let target_pt = if snap_res.is_none() && !alt_down {
+                            let free_pt = raw_pt + callout_grab_offset.unwrap_or_default();
+                            let callout_box = match (&m.kind, h) {
+                                (
+                                    MarkupKind::CloudPlus { box_rect, .. },
+                                    HandleKind::CalloutKnee,
+                                ) => Some(*box_rect),
+                                _ => None,
+                            };
+                            let target_pt = if callout_grab_offset.is_some() {
+                                match (&m.kind, h) {
+                                    (MarkupKind::Callout { knee, box_rect, .. }, HandleKind::CalloutKnee)
+                                        if shift_down && !alt_down =>
+                                            Point2::new(free_pt.x, callout_landing(*box_rect, *knee).0.y),
+                                    (_, HandleKind::CalloutTip) if snap_res.is_some() => pt,
+                                    (MarkupKind::Callout { knee, box_rect, .. }, HandleKind::CalloutTip)
+                                        if !alt_down && (shift_down || settings.snap.ortho_45) => {
+                                            let (knee, _) = callout_landing(*box_rect, *knee);
+                                            let target = apply_ortho_constraint(knee, free_pt, true);
+                                            hv_guide = Some((knee, target));
+                                            target
+                                        }
+                                    _ => free_pt,
+                                }
+                            } else if let Some(box_rect) = callout_box {
+                                if alt_down {
+                                    raw_pt
+                                } else {
+                                    let candidate = if shift_down { raw_pt } else { pt };
+                                    let anchor = box_rect_anchor(box_rect, candidate);
+                                    let target = snap_callout_landing(anchor, candidate, shift_down);
+                                    if target.y == anchor.y {
+                                        hv_guide = Some((anchor, target));
+                                    }
+                                    target
+                                }
+                            } else if snap_res.is_none() && !alt_down {
                                 let anchor = match (&m.kind, h) {
                                     (
                                         MarkupKind::Line { start: _, end }
                                         | MarkupKind::Arrow { start: _, end }
-                                        | MarkupKind::MeasureLength { start: _, end, .. }
-                                        | MarkupKind::MeasureDiameter {
-                                            p1: _,
-                                            p2: end,
-                                            ..
-                                        },
+                                        | MarkupKind::MeasureLength { end, .. }
+                                        | MarkupKind::MeasureDiameter { p2: end, .. },
                                         HandleKind::LineStart,
                                     ) => Some(*end),
                                     (
                                         MarkupKind::Line { start, end: _ }
                                         | MarkupKind::Arrow { start, end: _ }
-                                        | MarkupKind::MeasureLength { start, end: _, .. }
-                                        | MarkupKind::MeasureDiameter {
-                                            p1: start,
-                                            p2: _,
-                                            ..
-                                        },
+                                        | MarkupKind::MeasureLength { start, .. }
+                                        | MarkupKind::MeasureDiameter { p1: start, .. },
                                         HandleKind::LineEnd,
                                     ) => Some(*start),
                                     _ => None,
@@ -1130,7 +2027,11 @@ fn handle_canvas_input(
                             } else {
                                 pt
                             };
-                            apply_handle_drag(m, h, target_pt);
+                            let free_corner = alt_down && matches!(h, HandleKind::CloudCorner(_));
+                            apply_handle_drag(m, h, if free_corner { raw_pt } else { target_pt }, free_corner);
+                            if let HandleKind::CalloutBoxCorner(corner) = h {
+                                fit_callout_text(ui.ctx(), m, corner < 2);
+                            }
                             if let Some((ga, gb)) = hv_guide {
                                 let p = ui.painter_at(pane_rect);
                                 let (ax, ay) = xf.page_to_screen(ga);
@@ -1146,7 +2047,8 @@ fn handle_canvas_input(
                             }
                         }
                     }
-                } else {
+                }
+                if !primary_down {
                     canvas.drag = None;
                 }
             }
@@ -1157,13 +2059,18 @@ fn handle_canvas_input(
                 if primary_down {
                     let raw_delta = raw_pt - *last_pt;
                     let fine_scale = if alt_down { 0.2 } else { 1.0 };
-                    let mut delta = Point2::new(raw_delta.x * fine_scale, raw_delta.y * fine_scale);
+                    let delta = Point2::new(raw_delta.x * fine_scale, raw_delta.y * fine_scale);
                     if delta.len() > 0.02 {
                         let sel = tab.selected_ids.clone();
-                        let any_unlocked = tab
-                            .markups
+                        let locked_layers: std::collections::HashSet<String> = tab
+                            .layers
                             .iter()
-                            .any(|m| sel.contains(&m.id) && !m.locked);
+                            .filter(|l| l.locked)
+                            .map(|l| l.name.clone())
+                            .collect();
+                        let any_unlocked = tab.markups.iter().any(|m| {
+                            sel.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer)
+                        });
                         if any_unlocked {
                             if !*pushed_undo {
                                 tab.push_undo();
@@ -1171,7 +2078,10 @@ fn handle_canvas_input(
                             }
                             *last_pt = raw_pt;
                             for m in &mut tab.markups {
-                                if sel.contains(&m.id) && !m.locked {
+                                if sel.contains(&m.id)
+                                    && !m.locked
+                                    && !locked_layers.contains(&m.layer)
+                                {
                                     translate_markup(m, delta);
                                 }
                             }
@@ -1180,7 +2090,11 @@ fn handle_canvas_input(
                                 && sel.len() == 1
                                 && settings.snap.snap_to_content
                                 && let Some(idx) = snap_index
-                                && let Some(m) = tab.markups.iter_mut().find(|m| m.id == sel[0] && !m.locked)
+                                && let Some(m) = tab.markups.iter_mut().find(|m| {
+                                    m.id == sel[0]
+                                        && !m.locked
+                                        && !locked_layers.contains(&m.layer)
+                                })
                             {
                                 let snap_rad = tol_pt * 0.75;
                                 let anchor_snap = match &m.kind {
@@ -1209,7 +2123,6 @@ fn handle_canvas_input(
                             }
                         }
                     }
-                    let _ = &mut delta;
                 } else {
                     canvas.drag = None;
                 }
@@ -1225,12 +2138,12 @@ fn handle_canvas_input(
                     let (sx1, sy1) = xf.page_to_screen(r.max());
                     let sr = Rect::from_min_max(Pos2::new(sx0, sy0), Pos2::new(sx1, sy1));
                     let p = ui.painter_at(pane_rect);
-                    p.rect_filled(sr, CornerRadius::ZERO, theme.accent_red_soft);
+                    p.rect_filled(sr, CornerRadius::ZERO, theme.accent_red.gamma_multiply(0.18));
                     p.rect_stroke(sr, CornerRadius::ZERO, Stroke::new(1.0, theme.accent_red), egui::StrokeKind::Inside);
                 } else {
                     let r = Rect2::from_min_max(*start_pt, *current_pt);
                     if r.width() > 3.0 && r.height() > 3.0 {
-                        tab.selected_ids = tab
+                        let hits: Vec<Uuid> = tab
                             .markups
                             .iter()
                             .filter(|m| {
@@ -1240,6 +2153,33 @@ fn handle_canvas_input(
                             })
                             .map(|m| m.id)
                             .collect();
+                        // Expand group members for any hit markup
+                        let hit_groups: std::collections::HashSet<Uuid> = tab
+                            .markups
+                            .iter()
+                            .filter(|m| hits.contains(&m.id))
+                            .filter_map(|m| m.group_id)
+                            .collect();
+                        let mut expanded: Vec<Uuid> = hits;
+                        if !hit_groups.is_empty() {
+                            for m in &tab.markups {
+                                if let Some(gid) = m.group_id
+                                    && hit_groups.contains(&gid)
+                                    && !expanded.contains(&m.id)
+                                {
+                                    expanded.push(m.id);
+                                }
+                            }
+                        }
+                        if shift_down || ctrl_down {
+                            for id in expanded {
+                                if !tab.selected_ids.contains(&id) {
+                                    tab.selected_ids.push(id);
+                                }
+                            }
+                        } else {
+                            tab.selected_ids = expanded;
+                        }
                     }
                     canvas.drag = None;
                 }
@@ -1279,11 +2219,21 @@ fn handle_canvas_input(
             });
             if dx != 0.0 || dy != 0.0 {
                 let sel = tab.selected_ids.clone();
-                if tab.markups.iter().any(|m| sel.contains(&m.id) && !m.locked) {
+                let locked_layers: std::collections::HashSet<String> = tab
+                    .layers
+                    .iter()
+                    .filter(|l| l.locked)
+                    .map(|l| l.name.clone())
+                    .collect();
+                if tab
+                    .markups
+                    .iter()
+                    .any(|m| sel.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer))
+                {
                     tab.push_undo();
                     let delta = Point2::new(dx, dy);
                     for m in &mut tab.markups {
-                        if sel.contains(&m.id) && !m.locked {
+                        if sel.contains(&m.id) && !m.locked && !locked_layers.contains(&m.layer) {
                             translate_markup(m, delta);
                         }
                     }
@@ -1311,8 +2261,27 @@ fn handle_canvas_input(
                 .iter()
                 .find(|m| m.id == sel_snapshot[0])
                 .is_some_and(|m| matches!(m.kind, MarkupKind::MeasureArea { .. } | MarkupKind::MeasureVolume { .. }));
+        let selected_hyperlink = if sel_snapshot.len() == 1 {
+            tab.markups.iter().find_map(|m| {
+                if m.id == sel_snapshot[0]
+                    && let MarkupKind::Hyperlink { target, .. } = &m.kind
+                {
+                    Some(target.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         resp.context_menu(|ui| {
             if !sel_snapshot.is_empty() {
+                if let Some(ref target) = selected_hyperlink
+                    && ui.button("🔗 Abrir hipervínculo").clicked()
+                {
+                    actions.push(UiAction::FollowHyperlink(target.clone()));
+                    ui.close();
+                }
                 if ui.button("Editar texto / comentario").clicked() {
                     actions.push(UiAction::StartInlineEdit(sel_snapshot[0]));
                     ui.close();
@@ -1416,7 +2385,9 @@ fn handle_canvas_input(
 
     // Apply orthogonal constraint when Shift or Ortho setting is active relative to last anchor,
     // or soft magnetic horizontal/vertical alignment for cotas/lines when not holding Alt.
-    if let Some(origin) = creation_anchor(&canvas.creation)
+    if let Some(CreationState::Callout { knee: Some(knee), .. }) = &canvas.creation {
+        pt = Point2::new(raw_pt.x, knee.y);
+    } else if let Some(origin) = creation_anchor(&canvas.creation)
         && snap_res.is_none()
         && !alt_down
     {
@@ -1468,7 +2439,18 @@ fn handle_canvas_input(
                     let id = m.id;
                     tab.markups.push(m);
                     tab.select_only(id);
-                    canvas.inline_edit = Some((id, String::new(), true));
+                    let seq_tpl = canvas
+                        .active_chest_template
+                        .as_ref()
+                        .filter(|t| t.tool == ActiveTool::Note && t.sequence.is_some());
+                    if let Some(tpl) = seq_tpl {
+                        actions.push(UiAction::ConsumeToolSequence {
+                            item_id: tpl.id,
+                            markup_id: id,
+                        });
+                    } else {
+                        canvas.inline_edit = Some(InlineTextEdit::new(id, String::new()));
+                    }
                     if !settings.reuse_tool {
                         *active_tool = ActiveTool::Select;
                     }
@@ -1489,7 +2471,7 @@ fn handle_canvas_input(
                     let id = m.id;
                     tab.markups.push(m);
                     tab.select_only(id);
-                    canvas.inline_edit = Some((id, "Comentario".to_string(), true));
+                    canvas.inline_edit = Some(InlineTextEdit::new(id, "Comentario".to_string()));
                     if !settings.reuse_tool {
                         *active_tool = ActiveTool::Select;
                     }
@@ -1498,9 +2480,25 @@ fn handle_canvas_input(
                 ActiveTool::Stamp => {
                     tab.push_undo();
                     let rect = Rect2::from_xywh(pt.x - 105.0, pt.y - 26.0, 210.0, 52.0);
-                    let m = Markup::new(
+                    let tpl = canvas
+                        .active_chest_template
+                        .as_ref()
+                        .filter(|t| t.tool == ActiveTool::Stamp);
+                    let title = tpl
+                        .filter(|t| !t.default_text.is_empty())
+                        .map(|t| t.default_text.clone())
+                        .unwrap_or_else(|| "REVISADO".to_string());
+                    let subtitle = tpl
+                        .filter(|t| !t.stamp_subtitle.is_empty())
+                        .map(|t| t.stamp_subtitle.clone())
+                        .unwrap_or_else(|| "RedBIM Chile".to_string());
+                    let subject = tpl
+                        .filter(|t| !t.subject.is_empty())
+                        .map(|t| t.subject.clone())
+                        .unwrap_or_else(|| "Sello".to_string());
+                    let mut m = Markup::new(
                         cam_page_idx,
-                        "Sello",
+                        subject,
                         &settings.author_name,
                         MarkupStyle {
                             bold: true,
@@ -1512,12 +2510,16 @@ fn handle_canvas_input(
                         },
                         MarkupKind::Stamp {
                             rect,
-                            title: "REVISADO".to_string(),
-                            subtitle: "RedBIM Chile".to_string(),
+                            title,
+                            subtitle,
                             show_date: true,
                             show_author: true,
                         },
                     );
+                    if let Some(layer) = tpl.and_then(|t| t.layer.as_ref()) {
+                        tab.ensure_layer(layer);
+                        m.layer = layer.clone();
+                    }
                     let id = m.id;
                     tab.markups.push(m);
                     tab.select_only(id);
@@ -1534,41 +2536,56 @@ fn handle_canvas_input(
                     return;
                 }
                 ActiveTool::Image => {
-                    // Insert clean image placeholder or prompt via file dialog
                     if let Some(img_path) = rfd::FileDialog::new()
                         .add_filter("Imágenes", &["png", "jpg", "jpeg"])
                         .pick_file()
-                        && let Ok(bytes) = std::fs::read(&img_path)
                     {
-                        tab.push_undo();
-                        let b64 = crate::pdf::base64_encode(&bytes);
-                        let m = Markup::new(
-                            cam_page_idx,
-                            "Imagen",
-                            &settings.author_name,
-                            default_style.clone(),
-                            MarkupKind::Image {
-                                rect: Rect2::from_xywh(pt.x, pt.y, 180.0, 120.0),
-                                png_b64: b64,
-                                caption: img_path
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("Imagen")
-                                    .to_string(),
-                            },
-                        );
-                        let id = m.id;
-                        tab.markups.push(m);
-                        tab.select_only(id);
+                        match std::fs::read(&img_path) {
+                            Ok(bytes) => {
+                                let (w, h) = image::load_from_memory(&bytes)
+                                    .map(|im| {
+                                        let iw = im.width().max(1) as f64;
+                                        let ih = im.height().max(1) as f64;
+                                        let max_w = 220.0;
+                                        (max_w, (max_w * ih / iw).clamp(32.0, 360.0))
+                                    })
+                                    .unwrap_or((180.0, 120.0));
+                                tab.push_undo();
+                                let b64 = crate::pdf::base64_encode(&bytes);
+                                let m = Markup::new(
+                                    cam_page_idx,
+                                    "Imagen",
+                                    &settings.author_name,
+                                    default_style.clone(),
+                                    MarkupKind::Image {
+                                        rect: Rect2::from_xywh(pt.x, pt.y, w, h),
+                                        png_b64: b64.into(),
+                                        caption: img_path
+                                            .file_name()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("Imagen")
+                                            .to_string(),
+                                    },
+                                );
+                                let id = m.id;
+                                tab.markups.push(m);
+                                tab.select_only(id);
+                            }
+                            Err(e) => {
+                                actions.push(UiAction::ShowToast(format!(
+                                    "No se pudo leer la imagen: {e}"
+                                )));
+                            }
+                        }
                     }
                     if !settings.reuse_tool {
                         *active_tool = ActiveTool::Select;
                     }
                     return;
                 }
-                ActiveTool::Snapshot => {
+                ActiveTool::Snapshot | ActiveTool::VisualSearch => {
                     canvas.creation = Some(CreationState::TwoPoint {
-                        tool: ActiveTool::Snapshot,
+                        tool: *active_tool,
                         start: pt,
                         current: pt,
                         from_drag: false,
@@ -1618,7 +2635,8 @@ fn handle_canvas_input(
                 | ActiveTool::MeasurePerimeter
                 | ActiveTool::MeasureArea
                 | ActiveTool::MeasureVolume
-                | ActiveTool::CutoutPoly => {
+                | ActiveTool::CutoutPoly
+                | ActiveTool::Space => {
                     let target_id = if *active_tool == ActiveTool::CutoutPoly {
                         canvas.active_cutout_target.or_else(|| {
                             tab.markups
@@ -1713,12 +2731,7 @@ fn handle_canvas_input(
                     } else {
                         let tip = *arrow_tip;
                         let k = knee.unwrap();
-                        let box_rect = Rect2::from_xywh(
-                            pt.x,
-                            pt.y - 18.0,
-                            165.0,
-                            36.0,
-                        );
+                        let box_rect = callout_box_at(k, pt, 165.0, 36.0);
                         canvas.creation = None;
                         tab.push_undo();
                         let mut st = default_style.clone();
@@ -1727,7 +2740,7 @@ fn handle_canvas_input(
                             st.fill_color = Some([255, 255, 255, 240]);
                             st.fill_opacity = 0.92;
                         }
-                        let m = Markup::new(
+                        let mut m = Markup::new(
                             cam_page_idx,
                             "Observación",
                             &settings.author_name,
@@ -1739,10 +2752,22 @@ fn handle_canvas_input(
                                 text: "Revisar detalle".to_string(),
                             },
                         );
+                        fit_callout_text(ui.ctx(), &mut m, false);
                         let id = m.id;
                         tab.markups.push(m);
                         tab.select_only(id);
-                        canvas.inline_edit = Some((id, "Revisar detalle".to_string(), true));
+                        let seq_tpl = canvas
+                            .active_chest_template
+                            .as_ref()
+                            .filter(|t| t.tool == ActiveTool::Callout && t.sequence.is_some());
+                        if let Some(tpl) = seq_tpl {
+                            actions.push(UiAction::ConsumeToolSequence {
+                                item_id: tpl.id,
+                                markup_id: id,
+                            });
+                        } else {
+                            canvas.inline_edit = Some(InlineTextEdit::new(id, "Revisar detalle".to_string()));
+                        }
                         if !settings.reuse_tool {
                             *active_tool = ActiveTool::Select;
                         }
@@ -1751,12 +2776,7 @@ fn handle_canvas_input(
                 }
                 Some(CreationState::CloudPlus { cloud_rect, .. }) => {
                     let cr = *cloud_rect;
-                    let box_rect = Rect2::from_xywh(pt.x, pt.y - 18.0, 175.0, 38.0);
-                    let c_cent = cr.center();
-                    let knee = Point2::new(
-                        (c_cent.x + pt.x) * 0.5,
-                        pt.y,
-                    );
+                    let (knee, box_rect) = cloud_callout_layout(cr, pt);
                     canvas.creation = None;
                     tab.push_undo();
                     let mut st = default_style.clone();
@@ -1782,7 +2802,7 @@ fn handle_canvas_input(
                     let id = m.id;
                     tab.markups.push(m);
                     tab.select_only(id);
-                    canvas.inline_edit = Some((id, "Modificar según plano".to_string(), true));
+                    canvas.inline_edit = Some(InlineTextEdit::new(id, "Modificar según plano".to_string()));
                     if !settings.reuse_tool {
                         *active_tool = ActiveTool::Select;
                     }
@@ -1796,10 +2816,15 @@ fn handle_canvas_input(
                 Some(CreationState::Count { markup_id }) => {
                     let mid = *markup_id;
                     if !finish_requested
-                        && let Some(m) = tab.markups.iter_mut().find(|x| x.id == mid)
-                        && let MarkupKind::MeasureCount { points, .. } = &mut m.kind
+                        && tab.markups.iter().any(|x| x.id == mid)
                     {
-                        points.push(pt);
+                        tab.push_undo();
+                        if let Some(m) = tab.markups.iter_mut().find(|x| x.id == mid)
+                            && let MarkupKind::MeasureCount { points, .. } = &mut m.kind
+                        {
+                            points.push(pt);
+                            m.modified_at = chrono::Utc::now();
+                        }
                     }
                 }
                 _ => {}
@@ -1994,6 +3019,159 @@ fn handle_canvas_input(
     }
 }
 
+fn snap_callout_landing(anchor: Point2, target: Point2, lock_horizontal: bool) -> Point2 {
+    let delta = target - anchor;
+    if lock_horizontal || delta.y.abs().atan2(delta.x.abs()) <= 8.0_f64.to_radians() {
+        Point2::new(target.x, anchor.y)
+    } else {
+        target
+    }
+}
+
+fn callout_box_at(knee: Point2, anchor: Point2, width: f64, height: f64) -> Rect2 {
+    let x = if anchor.x < knee.x {
+        anchor.x.min(knee.x - 12.0) - width
+    } else {
+        anchor.x.max(knee.x + 12.0)
+    };
+    Rect2::from_xywh(x, anchor.y - height * 0.5, width, height)
+}
+
+fn cloud_callout_layout(cloud_rect: Rect2, anchor: Point2) -> (Point2, Rect2) {
+    let knee = Point2::new(cloud_rect.center().midpoint(anchor).x, anchor.y);
+    (knee, callout_box_at(knee, anchor, 175.0, 38.0))
+}
+
+#[cfg(test)]
+mod callout_tests {
+    use super::*;
+
+    #[test]
+    fn callout_landing_snaps_gently_and_can_lock_to_horizontal() {
+        let knee = Point2::new(100.0, 100.0);
+        for x in [60.0, 140.0] {
+            let almost_level = Point2::new(x, 104.0);
+            let angled = Point2::new(x, 120.0);
+            let horizontal = Point2::new(x, knee.y);
+            assert_eq!(snap_callout_landing(knee, almost_level, false), horizontal);
+            assert_eq!(snap_callout_landing(knee, angled, false), angled);
+            assert_eq!(snap_callout_landing(knee, angled, true), horizontal);
+            assert_eq!(
+                box_rect_anchor(callout_box_at(knee, angled, 165.0, 36.0), knee),
+                angled
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_callout_lands_horizontally_on_either_side() {
+        let cloud = Rect2::from_xywh(80.0, 80.0, 40.0, 40.0);
+        for x in [40.0, 160.0] {
+            let anchor = Point2::new(x, 55.0);
+            let (knee, box_rect) = cloud_callout_layout(cloud, anchor);
+            assert_eq!(knee.y, anchor.y);
+            assert_eq!(box_rect_anchor(box_rect, knee), anchor);
+        }
+    }
+
+    #[test]
+    fn cloud_callout_text_edits_in_label_and_can_commit_or_cancel() {
+        use crate::model::document::PageModel;
+        use crate::model::settings::ThemeMode;
+
+        let box_rect = Rect2::from_xywh(250.0, 60.0, 180.0, 45.0);
+        let markup = Markup::new(
+            0,
+            "Nube+",
+            "Autor",
+            MarkupStyle::default(),
+            MarkupKind::CloudPlus {
+                cloud_points: Rect2::from_xywh(40.0, 160.0, 120.0, 90.0)
+                    .corners()
+                    .to_vec(),
+                is_rect: true,
+                knee: Point2::new(200.0, 90.0),
+                box_rect,
+                text: "Revisar".into(),
+            },
+        );
+        let id = markup.id;
+        let mut tab = DocumentTab::new_with_pages(
+            "Prueba",
+            None,
+            Vec::new(),
+            vec![PageModel::new(0, 500.0, 350.0)],
+        );
+        tab.markups.push(markup);
+        let xf = PageTransform {
+            page_width_pt: 500.0,
+            page_height_pt: 350.0,
+            viewport_origin_x: 0.0,
+            viewport_origin_y: 0.0,
+            scale: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        };
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 350.0));
+        let theme = RedBimTheme::from_mode(ThemeMode::default());
+        let ctx = egui::Context::default();
+        let mut canvas = CanvasState::default();
+        let run = |tab: &mut DocumentTab, canvas: &mut CanvasState, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(pane),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    draw_inline_text_editor(ui, pane, xf, 0, tab, canvas, &theme);
+                },
+            );
+            output.textures_delta.clear();
+        };
+        for (key, modifiers) in [
+            (egui::Key::Escape, egui::Modifiers::NONE),
+            (egui::Key::Enter, egui::Modifiers::CTRL),
+        ] {
+            let editor = InlineTextEdit::new(id, "Revisar".into());
+            assert_eq!(
+                inline_text_geometry(&tab.markups[0], &editor, xf, pane, &theme).0,
+                screen_rect(xf, box_rect).shrink2(Vec2::new(5.0, 3.0))
+            );
+            canvas.inline_edit = Some(editor);
+            run(&mut tab, &mut canvas, vec![]);
+            run(
+                &mut tab,
+                &mut canvas,
+                vec![egui::Event::Text(" detalle".into())],
+            );
+            assert!(canvas.inline_edit.as_ref().unwrap().changed);
+            run(
+                &mut tab,
+                &mut canvas,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+            );
+            assert!(canvas.inline_edit.is_none());
+            assert_eq!(
+                tab.markups[0].text_content(),
+                Some(if key == egui::Key::Escape {
+                    "Revisar"
+                } else {
+                    "Revisar detalle"
+                })
+            );
+        }
+        assert!(tab.undo());
+        assert_eq!(tab.markups[0].text_content(), Some("Revisar"));
+    }
+}
+
 fn creation_anchor(c: &Option<CreationState>) -> Option<Point2> {
     match c {
         Some(CreationState::TwoPoint { start, .. }) => Some(*start),
@@ -2038,7 +3216,7 @@ fn finalize_two_point(
             let zy = vh / r.height().max(10.0);
             cam.zoom = zx.min(zy).clamp(0.05, 16.0);
             cam.pan = r.min();
-            cam.fit_pending = false;
+            cam.fit_page = false;
             *active_tool = ActiveTool::Select;
             return;
         }
@@ -2075,6 +3253,14 @@ fn finalize_two_point(
             let r = Rect2::from_min_max(start, end);
             if r.width() > 4.0 && r.height() > 4.0 {
                 actions.push(UiAction::CaptureSnapshot(r));
+            }
+            *active_tool = ActiveTool::Select;
+            return;
+        }
+        ActiveTool::VisualSearch => {
+            let r = Rect2::from_min_max(start, end);
+            if r.width() > 4.0 && r.height() > 4.0 {
+                actions.push(UiAction::RunVisualSearch(r));
             }
             *active_tool = ActiveTool::Select;
             return;
@@ -2128,8 +3314,10 @@ fn finalize_two_point(
             }
         }
         ActiveTool::MeasureLength => {
-            style.start_end = LineEnd::Slash;
-            style.end_end = LineEnd::Slash;
+            if style.start_end == LineEnd::None && style.end_end == LineEnd::None {
+                style.start_end = LineEnd::Slash;
+                style.end_end = LineEnd::Slash;
+            }
             MarkupKind::MeasureLength {
                 start,
                 end,
@@ -2148,23 +3336,77 @@ fn finalize_two_point(
             p2: end,
             opts: default_meas_opts.clone(),
         },
+        ActiveTool::Hyperlink => {
+            let target_page = if tab.pages.len() > 1 {
+                (page_idx + 1) % tab.pages.len()
+            } else {
+                0
+            };
+            let target_lbl = tab.page_display_label(target_page);
+            style.stroke_color = [37, 99, 235, 255];
+            style.fill_color = Some([37, 99, 235, 255]);
+            style.fill_opacity = 0.14;
+            style.line_style = LineStyle::Dashed;
+            style.line_width = 1.5;
+            MarkupKind::Hyperlink {
+                rect,
+                target: HyperlinkTarget::Page {
+                    page_index: target_page,
+                },
+                description: format!("Ir a {target_lbl}"),
+            }
+        }
+        ActiveTool::Redaction => {
+            style.stroke_color = [220, 38, 38, 255];
+            style.fill_color = Some([0, 0, 0, 255]);
+            style.fill_opacity = 0.45;
+            style.line_width = 1.6;
+            MarkupKind::Redaction {
+                rect,
+                overlay_text: "CENSURADO".to_string(),
+            }
+        }
         _ => return,
     };
 
+    let tpl = canvas
+        .active_chest_template
+        .as_ref()
+        .filter(|t| t.tool == tool);
+    let subject = tpl
+        .filter(|t| !t.subject.is_empty())
+        .map(|t| t.subject.clone())
+        .unwrap_or_else(|| tool.default_subject().to_string());
+
     tab.push_undo();
-    let m = Markup::new(
+    let mut m = Markup::new(
         page_idx,
-        tool.default_subject(),
+        subject,
         &settings.author_name,
         style,
         kind,
     );
+    if let Some(t) = tpl {
+        if let Some(ref layer) = t.layer {
+            tab.ensure_layer(layer);
+            m.layer = layer.clone();
+        }
+        if t.unit_cost.is_some() {
+            m.unit_cost = t.unit_cost;
+        }
+    }
     let id = m.id;
     let init_txt = m.text_content().unwrap_or("").to_string();
+    let seq_item_id = tpl.filter(|t| t.sequence.is_some()).map(|t| t.id);
     tab.markups.push(m);
     tab.select_only(id);
-    if open_inline {
-        canvas.inline_edit = Some((id, init_txt, true));
+    if let Some(item_id) = seq_item_id {
+        actions.push(UiAction::ConsumeToolSequence {
+            item_id,
+            markup_id: id,
+        });
+    } else if open_inline {
+        canvas.inline_edit = Some(InlineTextEdit::new(id, init_txt));
     }
     if !settings.reuse_tool {
         *active_tool = ActiveTool::Select;
@@ -2249,6 +3491,29 @@ fn finalize_poly(
         return;
     }
 
+    if tool == ActiveTool::Space {
+        if pts.len() >= 3 {
+            const SPACE_PALETTE: [[u8; 4]; 6] = [
+                [37, 99, 235, 255],
+                [22, 163, 74, 255],
+                [245, 158, 11, 255],
+                [147, 51, 234, 255],
+                [6, 182, 212, 255],
+                [229, 57, 53, 255],
+            ];
+            tab.push_undo();
+            let idx = tab.spaces.len();
+            let mut sp = SpaceRegion::new(page_idx, format!("Espacio {}", idx + 1), pts);
+            sp.fill_color = SPACE_PALETTE[idx % SPACE_PALETTE.len()];
+            tab.spaces.push(sp);
+            tab.highlight_spaces = true;
+        }
+        if !settings.reuse_tool {
+            *active_tool = ActiveTool::Select;
+        }
+        return;
+    }
+
     let mut style = default_style.clone();
     let kind = match tool {
         ActiveTool::Polyline => MarkupKind::Polyline { points: pts },
@@ -2322,7 +3587,9 @@ fn draw_markup_on_canvas(
     _totals: &crate::model::document::DocumentTotals,
     image_textures: &HashMap<Uuid, TextureHandle>,
     theme: &RedBimTheme,
+    inline_edit: Option<&InlineTextEdit>,
 ) {
+    let show_text = inline_edit.is_none_or(|edit| edit.subtitle);
     let sc = m.style.stroke_color;
     let alpha = (m.style.opacity * 255.0).clamp(10.0, 255.0) as u8;
     let stroke_col = Color32::from_rgba_unmultiplied(sc[0], sc[1], sc[2], alpha);
@@ -2347,9 +3614,8 @@ fn draw_markup_on_canvas(
 
     match &m.kind {
         MarkupKind::Note { pos } => {
-            let p = to_pos(*pos);
+            let r = note_pin_rect(xf, *pos);
             let bg = fill_col.unwrap_or(Color32::from_rgb(254, 240, 138));
-            let r = Rect::from_center_size(p, Vec2::splat(22.0));
             painter.rect(r, CornerRadius::same(4), bg, Stroke::new(1.5, stroke_col), egui::StrokeKind::Inside);
             let glyph = match m.style.note_icon {
                 NoteIcon::Checkmark => "OK",
@@ -2358,14 +3624,15 @@ fn draw_markup_on_canvas(
                 NoteIcon::Star => "*",
                 _ => "N",
             };
-            painter.text(p, egui::Align2::CENTER_CENTER, glyph, FontId::proportional(11.5), Color32::from_rgb(30, 30, 35));
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(11.5), Color32::from_rgb(30, 30, 35));
         }
         MarkupKind::TextBox { rect, text } => {
             draw_box_shape(painter, xf, *rect, m.style.box_shape, fill_col, stroke);
-            let r = screen_rect(xf, *rect);
-            draw_wrapped_box_text(painter, r, text, font_px, text_col);
+            if show_text {
+                draw_wrapped_box_text(painter, screen_rect(xf, *rect), text, font_px, text_col);
+            }
         }
-        MarkupKind::Typewriter { pos, text } => {
+        MarkupKind::Typewriter { pos, text } if show_text => {
             painter.text(
                 to_pos(*pos),
                 egui::Align2::LEFT_TOP,
@@ -2374,19 +3641,33 @@ fn draw_markup_on_canvas(
                 text_col,
             );
         }
+        MarkupKind::Typewriter { .. } => {}
         MarkupKind::Callout {
             arrow_tip,
             knee,
             box_rect,
             text,
         } => {
-            let anchor = box_rect_anchor(*box_rect, *knee);
-            painter.line_segment([to_pos(*arrow_tip), to_pos(*knee)], stroke);
-            painter.line_segment([to_pos(*knee), to_pos(anchor)], stroke);
-            draw_line_end(painter, to_pos(*knee), to_pos(*arrow_tip), m.style.end_end, stroke, stroke_col);
+            let (knee, anchor) = callout_landing(*box_rect, *knee);
+            painter.line_segment([to_pos(*arrow_tip), to_pos(knee)], stroke);
+            painter.line_segment([to_pos(knee), to_pos(anchor)], stroke);
+            draw_line_end(painter, to_pos(knee), to_pos(*arrow_tip), m.style.end_end, stroke, stroke_col);
             draw_box_shape(painter, xf, *box_rect, m.style.box_shape, fill_col, stroke);
-            let sr = screen_rect(xf, *box_rect);
-            draw_wrapped_box_text(painter, sr, text, font_px, text_col);
+            if show_text {
+                let rect = screen_rect(xf, *box_rect);
+                let inner = callout_text_rect(rect, xf.scale as f32);
+                let galley = painter.layout(
+                    text.clone(),
+                    FontId::proportional(m.style.font_size * xf.scale as f32),
+                    text_col,
+                    inner.width().max(1.0),
+                );
+                if galley.size().y <= inner.height() + xf.scale as f32 {
+                    painter.with_clip_rect(inner).galley(inner.left_top(), galley, text_col);
+                } else {
+                    draw_wrapped_box_text(painter, rect, text, font_px, text_col);
+                }
+            }
         }
         MarkupKind::Cloud { points, .. } => {
             let cloud = generate_cloud_polyline(points, m.style.cloud_arc_size as f64);
@@ -2417,8 +3698,9 @@ fn draw_markup_on_canvas(
             painter.line_segment([to_pos(c_pt), to_pos(*knee)], stroke);
             painter.line_segment([to_pos(*knee), to_pos(anchor)], stroke);
             draw_box_shape(painter, xf, *box_rect, m.style.box_shape, fill_col, stroke);
-            let sr = screen_rect(xf, *box_rect);
-            draw_wrapped_box_text(painter, sr, text, font_px, text_col);
+            if show_text {
+                draw_wrapped_box_text(painter, screen_rect(xf, *box_rect), text, font_px, text_col);
+            }
         }
         MarkupKind::Line { start, end } => {
             draw_styled_polyline(painter, &[to_pos(*start), to_pos(*end)], false, m.style.line_style, stroke);
@@ -2427,11 +3709,28 @@ fn draw_markup_on_canvas(
         }
         MarkupKind::Arrow { start, end } => {
             draw_styled_polyline(painter, &[to_pos(*start), to_pos(*end)], false, m.style.line_style, stroke);
-            draw_line_end(painter, to_pos(*start), to_pos(*end), LineEnd::ClosedArrow, stroke, stroke_col);
+            let end_style = if m.style.end_end == LineEnd::None {
+                LineEnd::ClosedArrow
+            } else {
+                m.style.end_end
+            };
+            draw_line_end(painter, to_pos(*end), to_pos(*start), m.style.start_end, stroke, stroke_col);
+            draw_line_end(painter, to_pos(*start), to_pos(*end), end_style, stroke, stroke_col);
         }
         MarkupKind::Polyline { points } | MarkupKind::MeasurePolylength { points, .. } => {
             let spts: Vec<Pos2> = points.iter().copied().map(to_pos).collect();
             draw_styled_polyline(painter, &spts, false, m.style.line_style, stroke);
+            if spts.len() >= 2 {
+                draw_line_end(painter, spts[1], spts[0], m.style.start_end, stroke, stroke_col);
+                draw_line_end(
+                    painter,
+                    spts[spts.len() - 2],
+                    spts[spts.len() - 1],
+                    m.style.end_end,
+                    stroke,
+                    stroke_col,
+                );
+            }
         }
         MarkupKind::Arc { start, mid, end } => {
             let arc = sample_three_point_arc(*start, *mid, *end, 28);
@@ -2453,7 +3752,8 @@ fn draw_markup_on_canvas(
             if let Some(fc) = fill_col {
                 painter.add(egui::Shape::convex_polygon(spts.clone(), fc, Stroke::NONE));
             }
-            painter.add(egui::Shape::closed_line(spts, stroke));
+            draw_hatch_overlay(painter, xf, &pts, &[], m.style.hatch, stroke_col);
+            draw_styled_polyline(painter, &spts, true, m.style.line_style, stroke);
         }
         MarkupKind::Polygon { points } | MarkupKind::SketchPoly { points, closed: true, .. } => {
             draw_polygon_with_fill_and_hatch(painter, xf, points, &[], fill_col, m.style.hatch, m.style.line_style, stroke, stroke_col);
@@ -2508,13 +3808,15 @@ fn draw_markup_on_canvas(
             let title_px = (sr.height() * 0.34).clamp(7.0, 28.0);
             let sub_px = (sr.height() * 0.20).clamp(5.5, 14.0);
             let clipped = painter.with_clip_rect(sr.shrink(3.0));
-            clipped.text(
-                Pos2::new(sr.center().x, sr.top() + sr.height() * 0.35),
-                egui::Align2::CENTER_CENTER,
-                title,
-                FontId::proportional(title_px),
-                text_col,
-            );
+            if show_text {
+                clipped.text(
+                    Pos2::new(sr.center().x, sr.top() + sr.height() * 0.35),
+                    egui::Align2::CENTER_CENTER,
+                    title,
+                    FontId::proportional(title_px),
+                    text_col,
+                );
+            }
             let mut sub_parts = Vec::new();
             if !subtitle.is_empty() {
                 sub_parts.push(subtitle.clone());
@@ -2525,7 +3827,7 @@ fn draw_markup_on_canvas(
             if *show_date {
                 sub_parts.push(m.created_at.format("%d/%m/%Y").to_string());
             }
-            if !sub_parts.is_empty() {
+            if !sub_parts.is_empty() && inline_edit.is_none_or(|edit| !edit.subtitle) {
                 let sub_str = sub_parts.join(" · ");
                 let max_sub_w = (sr.width() - 12.0).max(20.0);
                 let fit_sub = max_sub_w / (sub_str.chars().count().max(1) as f32 * 0.52);
@@ -2568,13 +3870,15 @@ fn draw_markup_on_canvas(
                 CornerRadius::ZERO,
                 stroke_col,
             );
-            painter.text(
-                tl + Vec2::new(8.0, 12.0),
-                egui::Align2::LEFT_CENTER,
-                title,
-                FontId::proportional(12.0),
-                Color32::WHITE,
-            );
+            if show_text {
+                painter.text(
+                    tl + Vec2::new(8.0, 12.0),
+                    egui::Align2::LEFT_CENTER,
+                    title,
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+            }
             for (i, (subj, cnt, qty)) in legend_rows.iter().enumerate() {
                 let ry = tl.y + 30.0 + i as f32 * row_h;
                 painter.text(
@@ -2590,6 +3894,65 @@ fn draw_markup_on_canvas(
                     qty,
                     FontId::proportional(11.0),
                     stroke_col,
+                );
+            }
+        }
+        MarkupKind::Hyperlink { rect, .. } => {
+            let sr = screen_rect(xf, *rect);
+            let link_fill = fill_col.unwrap_or(Color32::from_rgba_unmultiplied(37, 99, 235, 36));
+            painter.rect_filled(sr, CornerRadius::same(3), link_fill);
+            draw_dashed_rect(painter, sr, Stroke::new(sw.max(1.4), stroke_col), 6.0, 4.0);
+            let (badge_r, badge_txt) = hyperlink_badge(m, xf).unwrap();
+            painter.rect_filled(
+                badge_r,
+                CornerRadius::same(3),
+                Color32::from_rgba_unmultiplied(30, 64, 175, 220),
+            );
+            if show_text {
+                painter.text(
+                    badge_r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    badge_txt,
+                    FontId::proportional(10.0),
+                    Color32::WHITE,
+                );
+            }
+        }
+        MarkupKind::Redaction {
+            rect,
+            overlay_text,
+        } => {
+            let sr = screen_rect(xf, *rect);
+            painter.rect_filled(sr, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(15, 15, 20, 155));
+            // Diagonal warning hatch lines indicating pending (not yet destructively applied) redaction
+            let step = 12.0_f32;
+            let clipped = painter.with_clip_rect(sr);
+            let mut x = sr.left() - sr.height();
+            while x < sr.right() {
+                clipped.line_segment(
+                    [Pos2::new(x, sr.bottom()), Pos2::new(x + sr.height(), sr.top())],
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(239, 68, 68, 125)),
+                );
+                x += step;
+            }
+            painter.rect_stroke(
+                sr,
+                CornerRadius::ZERO,
+                Stroke::new(1.8, Color32::from_rgb(220, 38, 38)),
+                egui::StrokeKind::Inside,
+            );
+            let lbl = if overlay_text.trim().is_empty() {
+                "REDACCIÓN PENDIENTE"
+            } else {
+                overlay_text.trim()
+            };
+            if show_text {
+                clipped.text(
+                    sr.center(),
+                    egui::Align2::CENTER_CENTER,
+                    lbl,
+                    FontId::proportional((sr.height() * 0.34).clamp(8.5, 16.0)),
+                    Color32::WHITE,
                 );
             }
         }
@@ -2717,8 +4080,31 @@ fn draw_markup_on_canvas(
         draw_caption_pill(painter, mid, seg_txt, stroke_col);
     }
 
+    // Site photo capture indicator badge on canvas
+    if !m.attachments.is_empty() {
+        let b = markup_bounds(m);
+        let sr = screen_rect(xf, b);
+        let badge_txt = format!("📷 {}", m.attachments.len());
+        let br = Rect::from_min_size(
+            Pos2::new(sr.right() + 2.0, (sr.top() - 10.0).max(0.0)),
+            Vec2::new(34.0, 16.0),
+        );
+        painter.rect_filled(
+            br,
+            CornerRadius::same(4),
+            Color32::from_rgba_unmultiplied(15, 23, 42, 215),
+        );
+        painter.text(
+            br.center(),
+            egui::Align2::CENTER_CENTER,
+            badge_txt,
+            FontId::proportional(9.5),
+            Color32::WHITE,
+        );
+    }
+
     // Selection bounding box & control handles
-    if selected {
+    if selected && !(inline_edit.is_some() && matches!(m.kind, MarkupKind::Note { .. })) {
         let b = markup_bounds(m);
         let sr = screen_rect(xf, b).expand(4.0);
         draw_dashed_rect(painter, sr, Stroke::new(1.2, theme.accent_cyan), 5.0, 4.0);
@@ -2755,7 +4141,7 @@ fn build_legend_summary(tab: &DocumentTab, page_idx: usize) -> Vec<(String, usiz
     };
     let mut map: BTreeMap<String, (usize, f64, f64, f64, usize)> = BTreeMap::new();
     for m in &tab.markups {
-        if m.page_index != page_idx || !m.is_measurement() {
+        if m.page_index != page_idx || !m.is_measurement() || !tab.is_layer_visible(&m.layer) {
             continue;
         }
         let metrics = m.compute_metrics(&page.scale, &page.viewports);
@@ -2766,7 +4152,7 @@ fn build_legend_summary(tab: &DocumentTab, page_idx: usize) -> Vec<(String, usiz
         };
         let entry = map.entry(key).or_insert((0, 0.0, 0.0, 0.0, 0));
         entry.0 += 1;
-        entry.1 += metrics.length_m.unwrap_or(0.0);
+        entry.1 += metrics.length_m.or(metrics.perimeter_m).unwrap_or(0.0);
         entry.2 += metrics.area_m2.unwrap_or(0.0);
         entry.3 += metrics.volume_m3.unwrap_or(0.0);
         entry.4 += metrics.count.unwrap_or(0);
@@ -2791,6 +4177,37 @@ fn screen_rect(xf: PageTransform, r: Rect2) -> Rect {
     let (x0, y0) = xf.page_to_screen(r.min());
     let (x1, y1) = xf.page_to_screen(r.max());
     Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
+}
+
+fn callout_text_rect(rect: Rect, scale: f32) -> Rect {
+    rect.shrink2(Vec2::new(5.0, 3.0) * scale)
+}
+
+pub(crate) fn fit_callout_text(ctx: &egui::Context, markup: &mut Markup, keep_bottom: bool) {
+    let MarkupKind::Callout { knee, box_rect, text, .. } = &mut markup.kind else {
+        return;
+    };
+    let inner = callout_text_rect(
+        Rect::from_min_size(Pos2::ZERO, Vec2::new(box_rect.width() as f32, box_rect.height() as f32)),
+        1.0,
+    );
+    let galley = ctx.fonts_mut(|fonts| {
+        fonts.layout(
+            text.clone(),
+            FontId::proportional(markup.style.font_size),
+            Color32::WHITE,
+            inner.width().max(1.0),
+        )
+    });
+    let extra = (galley.size().y + 2.0 - inner.height()).max(0.0) as f64;
+    if extra > 0.0 {
+        *knee = callout_landing(*box_rect, *knee).0;
+    }
+    if keep_bottom {
+        box_rect.min_y -= extra;
+    } else {
+        box_rect.max_y += extra;
+    }
 }
 
 fn draw_wrapped_box_text(
@@ -3184,6 +4601,22 @@ fn draw_creation_preview(
                 painter.rect_filled(r, CornerRadius::ZERO, theme.accent_cyan.gamma_multiply(0.12));
                 draw_dashed_rect(painter, r, Stroke::new(1.8, theme.accent_cyan), 6.0, 4.0);
             }
+            ActiveTool::VisualSearch => {
+                let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
+                painter.rect_filled(r, CornerRadius::same(2), theme.accent_amber.gamma_multiply(0.16));
+                draw_dashed_rect(painter, r, Stroke::new(1.8, theme.accent_amber), 5.0, 3.0);
+            }
+            ActiveTool::Hyperlink => {
+                let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
+                let blue = Color32::from_rgb(37, 99, 235);
+                painter.rect_filled(r, CornerRadius::same(3), blue.gamma_multiply(0.15));
+                draw_dashed_rect(painter, r, Stroke::new(1.8, blue), 6.0, 4.0);
+            }
+            ActiveTool::Redaction => {
+                let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
+                painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(15, 15, 20, 140));
+                painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.8, theme.accent_red), egui::StrokeKind::Inside);
+            }
             _ => {
                 let r = screen_rect(xf, Rect2::from_min_max(*start, *current));
                 painter.rect_stroke(r, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
@@ -3200,8 +4633,11 @@ fn draw_creation_preview(
             current,
         } => {
             if let Some(k) = knee {
+                let box_rect = callout_box_at(*k, *current, 165.0, 36.0);
                 painter.line_segment([to_pos(*arrow_tip), to_pos(*k)], stroke);
-                painter.line_segment([to_pos(*k), to_pos(*current)], stroke);
+                painter.line_segment([to_pos(*k), to_pos(callout_landing(box_rect, *k).1)], stroke);
+                let rect = screen_rect(xf, box_rect);
+                painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
             } else {
                 painter.line_segment([to_pos(*arrow_tip), to_pos(*current)], stroke);
             }
@@ -3209,7 +4645,15 @@ fn draw_creation_preview(
         CreationState::CloudPlus { cloud_rect, current } => {
             let sr = screen_rect(xf, *cloud_rect);
             painter.rect_stroke(sr, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
-            painter.line_segment([sr.center(), to_pos(*current)], stroke);
+            let (knee, box_rect) = cloud_callout_layout(*cloud_rect, *current);
+            painter.line_segment([sr.center(), to_pos(knee)], stroke);
+            painter.line_segment([to_pos(knee), to_pos(*current)], stroke);
+            painter.rect_stroke(
+                screen_rect(xf, box_rect),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
         }
         CreationState::Poly {
             tool,
@@ -3333,7 +4777,7 @@ fn draw_uncalibrated_scale_banner(
                                 egui::Button::new(
                                     egui::RichText::new("Calibrar 2 pts")
                                         .size(11.0)
-                                        .color(Color32::WHITE),
+                                        .color(theme.text_on_accent),
                                 )
                                 .fill(theme.accent_red),
                             )

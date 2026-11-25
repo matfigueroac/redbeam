@@ -5,11 +5,12 @@ use hayro::hayro_interpret::hayro_cmap::CidFamily;
 use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps,
-    InterpreterCache, InterpreterSettings, SoftMask, interpret_page,
+    InterpreterCache, InterpreterSettings, RenderContent, SoftMask, interpret_page,
 };
 use hayro::hayro_syntax::Pdf;
 use hayro::kurbo::{Affine, BezPath, PathEl, Rect};
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::peniko::ImageAlphaType;
 use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit};
 use hayro::{PixmapSettings, RenderCache, RenderSettings, render, render_into};
 use std::collections::HashMap;
@@ -30,6 +31,8 @@ pub struct RgbaImageData {
 pub enum RenderCommand {
     LoadDocument {
         doc_id: Uuid,
+        revision: u64,
+        /// The viewer excludes annotations during rendering, so original PDF bytes can be shared.
         clean_pdf_bytes: Arc<Vec<u8>>,
     },
     CloseDocument {
@@ -49,6 +52,7 @@ pub enum RenderCommand {
     RenderTile {
         doc_id: Uuid,
         page_index: usize,
+        is_secondary: bool,
         crop_rect_pt: Rect2,
         out_w: u16,
         out_h: u16,
@@ -60,7 +64,9 @@ pub enum RenderCommand {
     },
     ExtractSearchText {
         doc_id: Uuid,
+        revision: u64,
         raw_pdf_bytes: Arc<Vec<u8>>,
+        detect_scales: bool,
     },
 }
 
@@ -68,35 +74,67 @@ pub enum RenderCommand {
 pub enum RenderResult {
     ThumbnailReady {
         doc_id: Uuid,
+        revision: u64,
         page_index: usize,
         image: RgbaImageData,
     },
     BasePageReady {
         doc_id: Uuid,
+        revision: u64,
         page_index: usize,
         generation: u64,
         image: RgbaImageData,
     },
     TileReady {
         doc_id: Uuid,
+        revision: u64,
         page_index: usize,
+        is_secondary: bool,
         crop_rect_pt: Rect2,
         generation: u64,
         image: RgbaImageData,
     },
     SnapReady {
         doc_id: Uuid,
+        revision: u64,
         page_index: usize,
         index: SnapIndex,
     },
     SearchTextReady {
         doc_id: Uuid,
+        revision: u64,
         text_by_page: Vec<String>,
+        scale_detection_source: Option<Arc<Vec<u8>>>,
     },
     Error {
         doc_id: Uuid,
+        revision: u64,
         message: String,
     },
+}
+
+impl RenderResult {
+    pub fn document_id(&self) -> Uuid {
+        match self {
+            Self::ThumbnailReady { doc_id, .. }
+            | Self::BasePageReady { doc_id, .. }
+            | Self::TileReady { doc_id, .. }
+            | Self::SnapReady { doc_id, .. }
+            | Self::SearchTextReady { doc_id, .. }
+            | Self::Error { doc_id, .. } => *doc_id,
+        }
+    }
+
+    pub fn document_revision(&self) -> u64 {
+        match self {
+            Self::ThumbnailReady { revision, .. }
+            | Self::BasePageReady { revision, .. }
+            | Self::TileReady { revision, .. }
+            | Self::SnapReady { revision, .. }
+            | Self::SearchTextReady { revision, .. }
+            | Self::Error { revision, .. } => *revision,
+        }
+    }
 }
 
 pub struct PdfRenderWorker {
@@ -105,8 +143,12 @@ pub struct PdfRenderWorker {
     rx: Receiver<RenderResult>,
 }
 
+type TileKey = (Uuid, usize, bool);
+type TileJob = (Rect2, u16, u16, u64);
+
 struct CachedDoc {
     pdf: Pdf,
+    revision: u64,
 }
 
 impl PdfRenderWorker {
@@ -124,7 +166,7 @@ impl PdfRenderWorker {
                 .name("redbim-pdf-fast".to_string())
                 .spawn(move || {
                     let mut docs: HashMap<Uuid, CachedDoc> = HashMap::new();
-                    let interp_settings = default_interpreter_settings();
+                    let interp_settings = viewer_interpreter_settings();
                     let render_settings = RenderSettings::default();
 
                     while let Ok(first) = fast_rx.recv() {
@@ -134,23 +176,37 @@ impl PdfRenderWorker {
                         }
 
                         let mut latest_base: HashMap<(Uuid, usize), (u32, u64)> = HashMap::new();
-                        let mut latest_tile: HashMap<(Uuid, usize), (Rect2, u16, u16, u64)> =
-                            HashMap::new();
+                        let mut latest_tile: HashMap<TileKey, TileJob> = HashMap::new();
 
                         for cmd in batch {
                             match cmd {
                                 RenderCommand::LoadDocument {
                                     doc_id,
+                                    revision,
                                     clean_pdf_bytes,
                                 } => {
-                                    if let Ok(pdf) = Pdf::new(clean_pdf_bytes) {
-                                        docs.insert(doc_id, CachedDoc { pdf });
+                                    latest_base.retain(|(d, _), _| *d != doc_id);
+                                    latest_tile.retain(|(d, _, _), _| *d != doc_id);
+                                    match Pdf::new(clean_pdf_bytes) {
+                                        Ok(pdf) => {
+                                            docs.insert(doc_id, CachedDoc { pdf, revision });
+                                        }
+                                        Err(e) => {
+                                            let _ = res_tx.send(RenderResult::Error {
+                                                doc_id,
+                                                revision,
+                                                message: format!(
+                                                    "No se pudo inicializar motor PDF: {e:?}"
+                                                ),
+                                            });
+                                            repaint_cb();
+                                        }
                                     }
                                 }
                                 RenderCommand::CloseDocument { doc_id } => {
                                     docs.remove(&doc_id);
                                     latest_base.retain(|(d, _), _| *d != doc_id);
-                                    latest_tile.retain(|(d, _), _| *d != doc_id);
+                                    latest_tile.retain(|(d, _, _), _| *d != doc_id);
                                 }
                                 RenderCommand::RenderBasePage {
                                     doc_id,
@@ -164,13 +220,14 @@ impl PdfRenderWorker {
                                 RenderCommand::RenderTile {
                                     doc_id,
                                     page_index,
+                                    is_secondary,
                                     crop_rect_pt,
                                     out_w,
                                     out_h,
                                     generation,
                                 } => {
                                     latest_tile.insert(
-                                        (doc_id, page_index),
+                                        (doc_id, page_index, is_secondary),
                                         (crop_rect_pt, out_w, out_h, generation),
                                     );
                                 }
@@ -190,6 +247,7 @@ impl PdfRenderWorker {
                                     Ok(image) => {
                                         let _ = res_tx.send(RenderResult::BasePageReady {
                                             doc_id,
+                                            revision: cached.revision,
                                             page_index,
                                             generation,
                                             image,
@@ -197,14 +255,20 @@ impl PdfRenderWorker {
                                         repaint_cb();
                                     }
                                     Err(message) => {
-                                        let _ = res_tx.send(RenderResult::Error { doc_id, message });
+                                        let _ = res_tx.send(RenderResult::Error {
+                                            doc_id,
+                                            revision: cached.revision,
+                                            message,
+                                        });
                                     }
                                 }
                             }
                         }
 
-                        for ((doc_id, page_index), (crop_rect_pt, out_w, out_h, generation)) in
-                            latest_tile
+                        for (
+                            (doc_id, page_index, is_secondary),
+                            (crop_rect_pt, out_w, out_h, generation),
+                        ) in latest_tile
                         {
                             if let Some(cached) = docs.get(&doc_id) {
                                 match render_tile_from_pdf(
@@ -219,7 +283,9 @@ impl PdfRenderWorker {
                                     Ok(image) => {
                                         let _ = res_tx.send(RenderResult::TileReady {
                                             doc_id,
+                                            revision: cached.revision,
                                             page_index,
+                                            is_secondary,
                                             crop_rect_pt,
                                             generation,
                                             image,
@@ -227,7 +293,11 @@ impl PdfRenderWorker {
                                         repaint_cb();
                                     }
                                     Err(message) => {
-                                        let _ = res_tx.send(RenderResult::Error { doc_id, message });
+                                        let _ = res_tx.send(RenderResult::Error {
+                                            doc_id,
+                                            revision: cached.revision,
+                                            message,
+                                        });
                                     }
                                 }
                             }
@@ -242,7 +312,7 @@ impl PdfRenderWorker {
             .name("redbim-pdf-bg".to_string())
             .spawn(move || {
                 let mut docs: HashMap<Uuid, CachedDoc> = HashMap::new();
-                let interp_settings = default_interpreter_settings();
+                let interp_settings = viewer_interpreter_settings();
                 let render_settings = RenderSettings::default();
 
                 while let Ok(first) = bg_rx.recv() {
@@ -256,10 +326,11 @@ impl PdfRenderWorker {
                         match cmd {
                             RenderCommand::LoadDocument {
                                 doc_id,
+                                revision,
                                 clean_pdf_bytes,
                             } => {
                                 if let Ok(pdf) = Pdf::new(clean_pdf_bytes) {
-                                    docs.insert(doc_id, CachedDoc { pdf });
+                                    docs.insert(doc_id, CachedDoc { pdf, revision });
                                 }
                             }
                             RenderCommand::CloseDocument { doc_id } => {
@@ -287,6 +358,7 @@ impl PdfRenderWorker {
                                 {
                                     let _ = res_tx.send(RenderResult::ThumbnailReady {
                                         doc_id,
+                                        revision: cached.revision,
                                         page_index,
                                         image,
                                     });
@@ -303,6 +375,7 @@ impl PdfRenderWorker {
                                 {
                                     let _ = res_tx.send(RenderResult::SnapReady {
                                         doc_id,
+                                        revision: cached.revision,
                                         page_index,
                                         index,
                                     });
@@ -311,12 +384,19 @@ impl PdfRenderWorker {
                             }
                             RenderCommand::ExtractSearchText {
                                 doc_id,
+                                revision,
                                 raw_pdf_bytes,
-                            } if docs.contains_key(&doc_id) => {
+                                detect_scales,
+                            } if docs
+                                .get(&doc_id)
+                                .is_some_and(|cached| cached.revision == revision) =>
+                            {
                                 let text_by_page = extract_search_text_by_page(&raw_pdf_bytes);
                                 let _ = res_tx.send(RenderResult::SearchTextReady {
                                     doc_id,
+                                    revision,
                                     text_by_page,
+                                    scale_detection_source: detect_scales.then_some(raw_pdf_bytes),
                                 });
                                 repaint_cb();
                             }
@@ -375,6 +455,14 @@ fn extract_search_text_by_page(raw_bytes: &[u8]) -> Vec<String> {
         }
     }
     out
+}
+
+// RedBIM paints editable annotations over the sheet in the canvas.
+fn viewer_interpreter_settings() -> InterpreterSettings {
+    InterpreterSettings {
+        render_content: RenderContent::PAGE,
+        ..default_interpreter_settings()
+    }
 }
 
 pub fn default_interpreter_settings() -> InterpreterSettings {
@@ -441,7 +529,7 @@ fn render_page_from_pdf(
     Ok(RgbaImageData {
         width: pixmap.width() as usize,
         height: pixmap.height() as usize,
-        premul_rgba: pixmap.data_as_u8_slice().to_vec(),
+        premul_rgba: pixmap.take_rgba8(ImageAlphaType::AlphaPremultiplied),
     })
 }
 
@@ -466,6 +554,7 @@ pub fn render_tile_rgba(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tile_from_pdf(
     pdf: &Pdf,
     page_index: usize,
@@ -475,7 +564,15 @@ fn render_tile_from_pdf(
     interp_settings: &InterpreterSettings,
     render_settings: &RenderSettings,
 ) -> Result<RgbaImageData, String> {
-    if out_w < 8 || out_h < 8 || crop_rect_pt.width() <= 0.1 || crop_rect_pt.height() <= 0.1 {
+    if out_w < 8
+        || out_h < 8
+        || out_w > 4096
+        || out_h > 4096
+        || !crop_rect_pt.width().is_finite()
+        || !crop_rect_pt.height().is_finite()
+        || crop_rect_pt.width() <= 0.1
+        || crop_rect_pt.height() <= 0.1
+    {
         return Err("Región de tile inválida".to_string());
     }
     let cache = RenderCache::new();
@@ -507,7 +604,7 @@ fn render_tile_from_pdf(
     Ok(RgbaImageData {
         width: pixmap.width() as usize,
         height: pixmap.height() as usize,
-        premul_rgba: pixmap.data_as_u8_slice().to_vec(),
+        premul_rgba: pixmap.take_rgba8(ImageAlphaType::AlphaPremultiplied),
     })
 }
 
@@ -546,8 +643,12 @@ impl Device<'_> for SnapDevice {
                     let pt1 = Self::xform(xf, p1);
                     let pt2 = Self::xform(xf, p2);
                     if let Some(prev) = cur_pt {
-                        self.index.insert_segment(prev, pt1.midpoint(pt2));
-                        self.index.insert_segment(pt1.midpoint(pt2), pt2);
+                        let mid = Point2::new(
+                            0.25 * prev.x + 0.5 * pt1.x + 0.25 * pt2.x,
+                            0.25 * prev.y + 0.5 * pt1.y + 0.25 * pt2.y,
+                        );
+                        self.index.insert_segment(prev, mid);
+                        self.index.insert_segment(mid, pt2);
                     }
                     cur_pt = Some(pt2);
                 }

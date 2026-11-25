@@ -1,0 +1,76 @@
+name: Windows
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1-x86_64-pc-windows-gnullvm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Preparar herramientas
+        run: |
+          $tools = ./installer/Get-Tools.ps1 -Destination "$env:RUNNER_TEMP/redbim-tools" -IncludeLlvm
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $tools.LlvmBin
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "REDBIM_ISCC=$($tools.Iscc)"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "REDBIM_CARGO_ABOUT=$($tools.CargoAbout)"
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Ejecutar pruebas de Rust
+        run: cargo test --locked --release --lib --tests
+
+      - name: Generar instalador Windows x64
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { '' }
+          ./installer/Build-Windows.ps1 -Iscc $env:REDBIM_ISCC -CargoAbout $env:REDBIM_CARGO_ABOUT -ExpectedTag $tag
+
+      - name: Probar el instalador
+        run: ./installer/Test-Installer.ps1 -Installer ./dist/RedBIM-Setup-x64.exe
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: redbim-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/RedBIM-Setup-x64.exe
+            dist/SHA256SUMS.txt
+            dist/Licencias-de-terceros.html
+
+  release:
+    if: github.ref_type == 'tag' && github.repository == 'matfigueroac/redbim'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: redbim-windows-x64
+          path: dist
+
+      - name: Publicar versión en GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" RedBIM-Setup-x64.exe SHA256SUMS.txt Licencias-de-terceros.html \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "RedBIM $RELEASE_TAG" --latest \
+            --notes 'Descarga **RedBIM-Setup-x64.exe** para instalar en Windows x64. Las copias instaladas recibirán un aviso al abrir RedBIM y podrán descargar la actualización desde la app. Consulta el [historial de cambios](https://github.com/matfigueroac/redbim/blob/main/CHANGELOG.md).' \
+            --generate-notes

@@ -8,7 +8,7 @@ use crate::model::units::{
 use crate::ui::actions::{DialogRequest, UiAction};
 use crate::ui::icons::{IconKind, icon_button};
 use crate::ui::theme::RedBimTheme;
-use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke};
+use eframe::egui::{self, CornerRadius, RichText, Stroke};
 
 pub fn draw_measurements_panel(
     ui: &mut egui::Ui,
@@ -40,6 +40,7 @@ pub fn draw_measurements_panel(
 
     egui::ScrollArea::vertical()
         .id_salt("meas_panel_scroll")
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             // Scale Header Card
             let card_border = if scale.is_set {
@@ -57,11 +58,14 @@ pub fn draw_measurements_panel(
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Escala de lámina:").size(11.5).color(theme.text_muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(scale.label())
-                                    .strong()
-                                    .size(12.5)
-                                    .color(card_border),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(scale.label())
+                                        .strong()
+                                        .size(12.5)
+                                        .color(card_border),
+                                )
+                                .wrap(),
                             );
                         });
                     });
@@ -69,7 +73,7 @@ pub fn draw_measurements_panel(
                     let cal_btn = egui::Button::new(
                         RichText::new("Calibrar escala (2 puntos)")
                             .strong()
-                            .color(Color32::WHITE),
+                            .color(theme.text_on_accent),
                     )
                     .fill(theme.accent_red)
                     .min_size(egui::vec2(ui.available_width(), 28.0));
@@ -77,7 +81,7 @@ pub fn draw_measurements_panel(
                         actions.push(UiAction::StartTwoPointCalibration);
                     }
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("Configurar X/Y...").clicked() {
                             actions.push(UiAction::OpenDialog(DialogRequest::SetScale));
                         }
@@ -115,6 +119,7 @@ pub fn draw_measurements_panel(
             egui::ComboBox::from_id_salt("meas_imp_preset")
                 .selected_text("Escalas imperiales (EE.UU.)...")
                 .width(ui.available_width())
+                .wrap_mode(egui::TextWrapMode::Wrap)
                 .show_ui(ui, |ui| {
                     for preset in IMPERIAL_PRESETS {
                         if ui.button(preset.label).clicked() {
@@ -130,7 +135,7 @@ pub fn draw_measurements_panel(
 
             // Chilean Metric vs American Imperial quick toggle
             ui.label(RichText::new("Sistema y unidades").strong().size(12.0));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .selectable_label(scale.display_unit.is_metric(), "Métrico Chile (m / m²)")
                     .clicked()
@@ -147,90 +152,21 @@ pub fn draw_measurements_panel(
                 }
             });
 
-            egui::Grid::new("meas_units_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Longitud:");
-                    egui::ComboBox::from_id_salt("mu_len")
-                        .selected_text(scale.display_unit.display_name())
-                        .width(155.0)
-                        .show_ui(ui, |ui| {
-                            for &u in LengthUnit::ALL {
-                                if ui
-                                    .selectable_value(&mut scale.display_unit, u, u.display_name())
-                                    .changed()
-                                {
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Área:");
-                    egui::ComboBox::from_id_salt("mu_area")
-                        .selected_text(scale.area_unit.display_name())
-                        .width(155.0)
-                        .show_ui(ui, |ui| {
-                            for &u in AreaUnit::ALL {
-                                if ui
-                                    .selectable_value(&mut scale.area_unit, u, u.display_name())
-                                    .changed()
-                                {
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Volumen:");
-                    egui::ComboBox::from_id_salt("mu_vol")
-                        .selected_text(scale.volume_unit.display_name())
-                        .width(155.0)
-                        .show_ui(ui, |ui| {
-                            for &u in VolumeUnit::ALL {
-                                if ui
-                                    .selectable_value(&mut scale.volume_unit, u, u.display_name())
-                                    .changed()
-                                {
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Precisión:");
-                    egui::ComboBox::from_id_salt("mu_prec")
-                        .selected_text(scale.precision.label())
-                        .width(155.0)
-                        .show_ui(ui, |ui| {
-                            for &pr in Precision::ALL {
-                                if ui
-                                    .selectable_value(&mut scale.precision, pr, pr.label())
-                                    .changed()
-                                {
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Pendiente:");
-                    egui::ComboBox::from_id_salt("mu_slope")
-                        .selected_text(scale.slope_format.display_name())
-                        .width(155.0)
-                        .show_ui(ui, |ui| {
-                            for &sf in SlopeFormat::ALL {
-                                if ui
-                                    .selectable_value(&mut scale.slope_format, sf, sf.display_name())
-                                    .changed()
-                                {
-                                    scale_changed = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-                });
+            scale_changed |= unit_combo(
+                ui, "Longitud:", &mut scale.display_unit, LengthUnit::ALL, LengthUnit::display_name,
+            );
+            scale_changed |= unit_combo(
+                ui, "Área:", &mut scale.area_unit, AreaUnit::ALL, AreaUnit::display_name,
+            );
+            scale_changed |= unit_combo(
+                ui, "Volumen:", &mut scale.volume_unit, VolumeUnit::ALL, VolumeUnit::display_name,
+            );
+            scale_changed |= unit_combo(
+                ui, "Precisión:", &mut scale.precision, Precision::ALL, Precision::label,
+            );
+            scale_changed |= unit_combo(
+                ui, "Pendiente:", &mut scale.slope_format, SlopeFormat::ALL, SlopeFormat::display_name,
+            );
 
             ui.separator();
 
@@ -273,31 +209,30 @@ pub fn draw_measurements_panel(
             ui.separator();
 
             // Viewports section
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(format!("Viewports ({})", viewports.len())).strong().size(12.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("+ Dibujar Viewport").clicked() {
-                        actions.push(UiAction::SetTool(ActiveTool::ViewportRegion));
-                    }
-                });
+                if ui.small_button("+ Dibujar Viewport").clicked() {
+                    actions.push(UiAction::SetTool(ActiveTool::ViewportRegion));
+                }
             });
             for vp in &viewports {
-                ui.horizontal(|ui| {
-                    ui.label(
+                ui.add(
+                    egui::Label::new(
                         RichText::new(format!("{} · {}", vp.name, vp.scale.label()))
                             .size(11.5)
                             .color(theme.accent_cyan),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("✕").on_hover_text("Eliminar Viewport").clicked() {
-                            actions.push(UiAction::DeleteViewport(vp.id));
-                        }
-                        if ui.small_button("Editar").on_hover_text("Editar nombre y escala del Viewport").clicked() {
-                            actions.push(UiAction::OpenDialog(DialogRequest::EditViewport {
-                                viewport_id: vp.id,
-                            }));
-                        }
-                    });
+                    )
+                    .wrap(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.small_button("Editar").on_hover_text("Editar nombre y escala del Viewport").clicked() {
+                        actions.push(UiAction::OpenDialog(DialogRequest::EditViewport {
+                            viewport_id: vp.id,
+                        }));
+                    }
+                    if ui.small_button("✕").on_hover_text("Eliminar Viewport").clicked() {
+                        actions.push(UiAction::DeleteViewport(vp.id));
+                    }
                 });
             }
 
@@ -383,5 +318,105 @@ pub fn draw_measurements_panel(
             scale,
             apply_all: *apply_all_pages,
         });
+    }
+}
+
+fn unit_combo<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut T,
+    options: &[T],
+    name: impl Fn(T) -> &'static str,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [72.0, 0.0],
+            egui::Label::new(label).halign(egui::Align::Min),
+        );
+        egui::ComboBox::from_id_salt(label)
+            .selected_text(name(*value))
+            .width(ui.available_width().min(155.0))
+            .wrap_mode(egui::TextWrapMode::Wrap)
+            .show_ui(ui, |ui| {
+                let mut changed = false;
+                for &option in options {
+                    changed |= ui.selectable_value(value, option, name(option)).changed();
+                }
+                changed
+            })
+            .inner
+            .unwrap_or(false)
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::math::Rect2;
+    use crate::model::scale::ViewportScale;
+    use crate::model::settings::ThemeMode;
+    use crate::pdf::io::open_demo_chile_document;
+
+    #[test]
+    fn measurements_fit_the_right_sidebar() {
+        let theme = RedBimTheme::from_mode(ThemeMode::Dark);
+        let mut tab = open_demo_chile_document().unwrap();
+        tab.pages[0].viewports.push(ViewportScale::new(
+            "Detalle de la estructura de montaje fotovoltaico en la cubierta principal",
+            Rect2::from_xywh(10.0, 10.0, 50.0, 50.0),
+            PageScale::from_metric_ratio(20.0),
+        ));
+        for (width, calibrated, system) in [
+            (230.0, false, UnitSystem::Imperial),
+            (275.0, true, UnitSystem::Metric),
+            (400.0, true, UnitSystem::Metric),
+        ] {
+            tab.pages[0].scale.is_set = calibrated;
+            tab.pages[0].scale.set_unit_system(system);
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                let mut right = 0.0;
+                let mut panel_right = 0.0;
+                let mut canvas_right = 0.0;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 620.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        right = ui.available_rect_before_wrap().right();
+                        let panel = egui::Panel::right("test_measurements")
+                            .exact_size(width)
+                            .frame(
+                                egui::Frame::new()
+                                    .inner_margin(egui::Margin::same(8))
+                                    .stroke(Stroke::new(1.0, theme.border)),
+                            )
+                            .show(ui, |ui| {
+                                draw_measurements_panel(
+                                    ui,
+                                    Some(&mut tab),
+                                    ActiveTool::MeasureLength,
+                                    &mut false,
+                                    &theme,
+                                    &mut Vec::new(),
+                                );
+                            });
+                        panel_right = panel.response.rect.right();
+                        canvas_right = ui.available_rect_before_wrap().right();
+                    },
+                );
+                output.textures_delta.clear();
+                assert!(
+                    (panel_right - right).abs() < 0.1,
+                    "width {width}: panel right edge {panel_right}, expected {right}"
+                );
+                assert!((canvas_right - (right - width)).abs() < 0.1);
+            }
+        }
     }
 }

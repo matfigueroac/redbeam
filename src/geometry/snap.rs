@@ -86,12 +86,19 @@ impl SnapIndex {
         }
         if bucket.len() < 96 {
             bucket.push((pt, kind));
+        } else if matches!(kind, SnapKind::Endpoint | SnapKind::Center)
+            && let Some(pos) = bucket.iter().position(|(_, k)| *k == SnapKind::Midpoint)
+        {
+            bucket[pos] = (pt, kind);
         }
     }
 
     pub fn insert_segment(&mut self, a: Point2, b: Point2) {
+        if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+            return;
+        }
         let d = a.dist(b);
-        if d < 0.2 {
+        if !d.is_finite() || d < 0.2 {
             return;
         }
         self.segment_count += 1;
@@ -104,7 +111,7 @@ impl SnapIndex {
 
     pub fn query_nearest(&self, target: Point2, radius_pt: f64) -> Option<SnapResult> {
         let c = self.cell_of(target);
-        let reach = ((radius_pt / self.cell_size).ceil() as i32).clamp(1, 3);
+        let reach = ((radius_pt / self.cell_size).ceil() as i32).clamp(1, 12);
         let max_sq = radius_pt * radius_pt;
         let mut best: Option<(f64, SnapResult)> = None;
 
@@ -134,7 +141,7 @@ impl SnapIndex {
     /// falling back to `query_nearest` (e.g. `Midpoint`) only if no endpoint is found.
     pub fn query_nearest_corner(&self, target: Point2, radius_pt: f64) -> Option<SnapResult> {
         let c = self.cell_of(target);
-        let reach = ((radius_pt / self.cell_size).ceil() as i32).clamp(1, 4);
+        let reach = ((radius_pt / self.cell_size).ceil() as i32).clamp(1, 12);
         let max_sq = radius_pt * radius_pt;
         let mut best_ep: Option<(f64, SnapResult)> = None;
 
@@ -249,6 +256,8 @@ fn markup_snap_points(m: &Markup) -> Vec<Point2> {
         | MarkupKind::Rectangle { rect }
         | MarkupKind::Stamp { rect, .. }
         | MarkupKind::Image { rect, .. }
+        | MarkupKind::Hyperlink { rect, .. }
+        | MarkupKind::Redaction { rect, .. }
         | MarkupKind::SketchRect { rect, .. } => rect.corners().to_vec(),
         MarkupKind::Ellipse { rect } => vec![rect.center()],
         MarkupKind::Callout {
@@ -262,10 +271,18 @@ fn markup_snap_points(m: &Markup) -> Vec<Point2> {
         | MarkupKind::Polygon { points }
         | MarkupKind::MeasurePolylength { points, .. }
         | MarkupKind::MeasurePerimeter { points, .. }
-        | MarkupKind::MeasureArea { points, .. }
-        | MarkupKind::MeasureVolume { points, .. }
         | MarkupKind::MeasureCount { points, .. }
         | MarkupKind::SketchPoly { points, .. } => points.clone(),
+        MarkupKind::MeasureArea {
+            points, cutouts, ..
+        }
+        | MarkupKind::MeasureVolume {
+            points, cutouts, ..
+        } => points
+            .iter()
+            .copied()
+            .chain(cutouts.iter().flatten().copied())
+            .collect(),
         MarkupKind::CloudPlus {
             cloud_points,
             knee,
@@ -327,13 +344,19 @@ pub fn apply_soft_hv_snap(origin: Point2, target: Point2, threshold_deg: f64) ->
 /// Automatically snaps the measured/anchor points of `m` to the nearest PDF vector corners/endpoints
 /// within `max_radius_pt`. Returns the number of points adjusted.
 pub fn snap_markup_points_to_index(m: &mut Markup, index: &SnapIndex, max_radius_pt: f64) -> usize {
+    if m.locked {
+        return 0;
+    }
     let mut snapped = 0usize;
-    let mut snap_pt = |pt: &mut Point2| {
+    let mut snap_pt = |pt: &mut Point2| -> bool {
         if let Some(hit) = index.query_nearest_corner(*pt, max_radius_pt)
             && hit.point.dist_sq(*pt) > 1e-6
         {
             *pt = hit.point;
             snapped += 1;
+            true
+        } else {
+            false
         }
     };
 
@@ -385,9 +408,17 @@ pub fn snap_markup_points_to_index(m: &mut Markup, index: &SnapIndex, max_radius
             snap_pt(vertex);
             snap_pt(p2);
         }
-        MarkupKind::MeasureRadius { center, edge, .. } => {
-            snap_pt(center);
-            snap_pt(edge);
+        MarkupKind::MeasureRadius {
+            center,
+            edge,
+            three_point,
+            ..
+        } => {
+            let moved_c = snap_pt(center);
+            let moved_e = snap_pt(edge);
+            if moved_c || moved_e {
+                *three_point = None;
+            }
         }
         MarkupKind::Callout { arrow_tip, .. } => {
             snap_pt(arrow_tip);

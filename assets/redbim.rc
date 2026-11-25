@@ -1,0 +1,26 @@
+#include "redbim_version.h"
+
+1 ICON "assets/redbim.ico"
+
+1 VERSIONINFO
+FILEVERSION VERSION_PARTS
+PRODUCTVERSION VERSION_PARTS
+FILEOS 0x40004L
+FILETYPE 0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "0c0a04b0"
+        BEGIN
+            VALUE "FileDescription", "RedBIM"
+            VALUE "FileVersion", VERSION_STRING
+            VALUE "OriginalFilename", "redbim.exe"
+            VALUE "ProductName", "RedBIM"
+            VALUE "ProductVersion", VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0c0a, 1200
+    END
+END

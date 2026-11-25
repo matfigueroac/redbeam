@@ -2,6 +2,7 @@ use crate::geometry::math::{
     Point2, Rect2, angle_three_points_deg, circle_from_three_points, dimension_offset_segment,
     polygon_centroid,
 };
+use crate::model::custom_columns::CustomColumnValue;
 use crate::model::scale::{PageScale, ViewportScale, resolve_scale_at};
 use crate::model::units::{
     AreaUnit, LengthUnit, Precision, SlopeFormat, VolumeUnit, format_angle, format_area,
@@ -9,6 +10,8 @@ use crate::model::units::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -233,8 +236,13 @@ impl NoteIcon {
         Self::Key,
         Self::Star,
         Self::Circle,
+        Self::Insert,
+        Self::NewParagraph,
+        Self::Paragraph,
         Self::RightArrow,
+        Self::RightPointer,
         Self::UpArrow,
+        Self::UpLeftArrow,
     ];
 
     pub fn label(self) -> &'static str {
@@ -383,6 +391,19 @@ impl Default for MeasurementOptions {
     }
 }
 
+/// Destination of a clickable PDF Hyperlink markup (mirrors Bluebeam's `IAnnotationHyperlinkModel`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HyperlinkTarget {
+    Page { page_index: usize },
+    Url(String),
+}
+
+impl Default for HyperlinkTarget {
+    fn default() -> Self {
+        Self::Page { page_index: 0 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MarkupKind {
     // --- Comentarios y texto ---
@@ -456,13 +477,23 @@ pub enum MarkupKind {
     },
     Image {
         rect: Rect2,
-        png_b64: String,
+        png_b64: Arc<str>,
         caption: String,
     },
     Legend {
         pos: Point2,
         title: String,
         width_pt: f64,
+    },
+    Hyperlink {
+        rect: Rect2,
+        target: HyperlinkTarget,
+        description: String,
+    },
+    /// Destructive redaction zone (Bluebeam `IAnnotationRedactionModel` / `SCmdRedact`).
+    Redaction {
+        rect: Rect2,
+        overlay_text: String,
     },
 
     // --- Mediciones a escala (Chile métrico + EE.UU. imperial) ---
@@ -542,6 +573,43 @@ pub struct ComputedMetrics {
     pub segment_displays: Vec<(Point2, Point2, String)>,
 }
 
+/// Site photo / punch-list image attached to any markup (Bluebeam Markup Capture).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkupAttachment {
+    pub id: Uuid,
+    pub caption: String,
+    pub image_b64: Arc<str>,
+    pub captured_at: DateTime<Utc>,
+}
+
+impl MarkupAttachment {
+    /// Decodes a local PNG/JPEG photo, downscales to at most `1024px` max dimension
+    /// to keep embedded PDF sizes fast & compact, and encodes as base64 JPEG.
+    pub fn from_image_bytes(caption: impl Into<String>, raw_bytes: &[u8]) -> Result<Self, String> {
+        let img = image::load_from_memory(raw_bytes)
+            .map_err(|e| format!("Imagen no válida: {e}"))?;
+        let resized = if img.width() > 1024 || img.height() > 1024 {
+            img.thumbnail(1024, 1024)
+        } else {
+            img
+        };
+        let mut encoded = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&mut encoded);
+            resized
+                .to_rgb8()
+                .write_to(&mut cursor, image::ImageFormat::Jpeg)
+                .map_err(|e| format!("Error comprimiendo foto: {e}"))?;
+        }
+        Ok(Self {
+            id: Uuid::new_v4(),
+            caption: caption.into(),
+            image_b64: crate::pdf::base64_encode(&encoded).into(),
+            captured_at: Utc::now(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Markup {
     pub id: Uuid,
@@ -559,6 +627,10 @@ pub struct Markup {
     pub group_id: Option<Uuid>,
     #[serde(default)]
     pub unit_cost: Option<f64>,
+    #[serde(default)]
+    pub custom_values: BTreeMap<Uuid, CustomColumnValue>,
+    #[serde(default)]
+    pub attachments: Vec<MarkupAttachment>,
     pub style: MarkupStyle,
     pub kind: MarkupKind,
 }
@@ -578,6 +650,8 @@ impl Markup {
             | MarkupKind::Callout { text, .. }
             | MarkupKind::CloudPlus { text, .. } => text.clone(),
             MarkupKind::Stamp { title, .. } => title.clone(),
+            MarkupKind::Hyperlink { description, .. } => description.clone(),
+            MarkupKind::Redaction { overlay_text, .. } => overlay_text.clone(),
             _ => String::new(),
         };
         Self {
@@ -595,6 +669,8 @@ impl Markup {
             locked: false,
             group_id: None,
             unit_cost: None,
+            custom_values: BTreeMap::new(),
+            attachments: Vec::new(),
             style,
             kind,
         }
@@ -620,6 +696,8 @@ impl Markup {
             MarkupKind::Stamp { .. } => "Sello",
             MarkupKind::Image { .. } => "Imagen",
             MarkupKind::Legend { .. } => "Leyenda",
+            MarkupKind::Hyperlink { .. } => "Hipervínculo",
+            MarkupKind::Redaction { .. } => "Redacción (Censura)",
             MarkupKind::MeasureLength { .. } => "Longitud",
             MarkupKind::MeasurePolylength { .. } => "Polilongitud",
             MarkupKind::MeasurePerimeter { .. } => "Perímetro",
@@ -693,6 +771,8 @@ impl Markup {
             | MarkupKind::CloudPlus { text, .. } => Some(text),
             MarkupKind::Stamp { title, .. } => Some(title),
             MarkupKind::Legend { title, .. } => Some(title),
+            MarkupKind::Hyperlink { description, .. } => Some(description),
+            MarkupKind::Redaction { overlay_text, .. } => Some(overlay_text),
             _ => None,
         }
     }
@@ -714,6 +794,14 @@ impl Markup {
             MarkupKind::Legend { title, .. } => {
                 *title = new_text;
             }
+            MarkupKind::Hyperlink { description, .. } => {
+                *description = new_text.clone();
+                self.comment = new_text;
+            }
+            MarkupKind::Redaction { overlay_text, .. } => {
+                *overlay_text = new_text.clone();
+                self.comment = new_text;
+            }
             _ => {
                 self.comment = new_text;
             }
@@ -728,6 +816,8 @@ impl Markup {
             | MarkupKind::Ellipse { rect }
             | MarkupKind::Stamp { rect, .. }
             | MarkupKind::Image { rect, .. }
+            | MarkupKind::Hyperlink { rect, .. }
+            | MarkupKind::Redaction { rect, .. }
             | MarkupKind::SketchRect { rect, .. } => rect.center(),
             MarkupKind::Callout { arrow_tip, .. } => *arrow_tip,
             MarkupKind::Cloud { points, .. }
@@ -811,7 +901,6 @@ impl Markup {
             MarkupKind::MeasurePerimeter { points, closed, .. } => {
                 let total = scale.polyline_length_meters(points, *closed);
                 out.perimeter_m = Some(total);
-                out.length_m = Some(total);
                 if opts.depth_meters > 0.0 {
                     out.wall_area_m2 = Some(total * opts.depth_meters);
                 }
@@ -959,7 +1048,7 @@ impl Markup {
         } else if let Some(a) = m.area_m2 {
             let au = opts.and_then(|o| o.area_unit_override).unwrap_or(scale.area_unit);
             au.from_sq_meters(a)
-        } else if let Some(l) = m.length_m {
+        } else if let Some(l) = m.length_m.or(m.perimeter_m) {
             let lu = opts.and_then(|o| o.length_unit_override).unwrap_or(scale.display_unit);
             lu.from_meters(l)
         } else if let Some(c) = m.count {

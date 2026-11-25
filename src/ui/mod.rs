@@ -1,11 +1,13 @@
 pub mod actions;
 pub mod canvas;
 pub mod dialogs;
+pub mod document_tabs;
 pub mod icons;
 pub mod left_panels;
 pub mod markups_list;
 pub mod measurements_panel;
 pub mod menu_bar;
+pub mod notes_panel;
 pub mod properties_panel;
 pub mod search_panel;
 pub mod status_bar;
