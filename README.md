@@ -6,11 +6,13 @@
 
 **Revisa, anota y cubica planos PDF en Windows.** RedBeam es una aplicación de escritorio en español para arquitectura, ingeniería y construcción. Trabaja con formatos ISO y unidades métricas de forma predeterminada y admite unidades imperiales.
 
-[Descargar para Windows x64][descarga] · [Ver versiones][versiones] · [Guía de funciones](docs/funciones.md)
+[Descargar para Windows x64][descarga] · [Microsoft Store][store] · [Ver versiones][versiones] · [Guía de funciones](docs/funciones.md)
 
 ![RedBeam con el plano de cubierta y sus marcas de ejemplo](docs/img/plano-demo.jpg)
 
 ## Instalar y actualizar
+
+Puedes instalar RedBeam desde [Microsoft Store][store]. La tienda gestiona las actualizaciones de esa edición. Para instalarlo desde GitHub, sigue estos pasos.
 
 1. Descarga [`RedBeam-Setup-x64.exe`][descarga] y ábrelo. El instalador crea un acceso en Inicio para tu usuario y ofrece un acceso en el escritorio.
 2. Abre **RedBeam** desde Inicio. En **Archivo → Abrir plano de ejemplo**, puedes practicar con tres láminas y marcas incluidas.
@@ -38,5 +40,6 @@ RedBeam trabaja con tus archivos localmente. Puedes volver a consultar GitHub de
 Código bajo [licencia MIT](LICENSE). Los avisos de dependencias se incluyen en el instalador.
 
 [descarga]: https://github.com/matfigueroac/redbeam/releases/latest
+[store]: https://apps.microsoft.com/detail/9MXXPBPXQ8TK
 [versiones]: https://github.com/matfigueroac/redbeam/releases
 [problemas]: https://github.com/matfigueroac/redbeam/issues
